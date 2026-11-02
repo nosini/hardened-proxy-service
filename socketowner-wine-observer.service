@@ -1,0 +1,49 @@
+[Unit]
+Description=Attribute Wine connections to Windows programs for mihomo
+Requires=socketowner.service
+PartOf=socketowner.service
+After=socketowner.service
+Before=mihomo.service
+
+[Service]
+Type=notify
+NotifyAccess=main
+ExecStart=/usr/local/bin/socketowner-wine-observer -pin /sys/fs/bpf/mihomo/maps -reader-group mihomo
+Restart=on-failure
+# A killed observer leaves pins; wait past the five-second heartbeat expiry.
+RestartSec=6
+TimeoutStartSec=30
+CapabilityBoundingSet=CAP_BPF CAP_PERFMON CAP_NET_ADMIN CAP_CHOWN CAP_SYS_PTRACE CAP_DAC_READ_SEARCH
+NoNewPrivileges=yes
+SystemCallFilter=@system-service bpf
+SystemCallArchitectures=native
+
+# The observer runs as root to pin in /sys/fs/bpf, whose root directory is root's alone.
+# ProtectKernelTunables= would make /sys/fs/bpf read-only too, and ReadWritePaths= can't
+# undo that, so the same paths are made read-only here with bpffs as the exception.
+# Attaching only opens /sys/fs/cgroup.
+ProtectSystem=strict
+ReadOnlyPaths=/sys /proc/sys /proc/sysrq-trigger /proc/fs /proc/irq
+ReadOnlyPaths=-/proc/acpi -/proc/latency_stats -/proc/timer_stats
+ReadWritePaths=/sys/fs/bpf
+ProtectControlGroups=yes
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+RestrictAddressFamilies=AF_UNIX AF_INET
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+UMask=0077
+
+# The observer needs the host network namespace cookie, so no PrivateNetwork.
+# Process fd links must stay visible; executable and namespace links suffice.
+
+[Install]
+WantedBy=mihomo.service

@@ -1,0 +1,52 @@
+[Unit]
+Description=Record the process behind each connection for mihomo
+# mihomo binds the maps directory into its sandbox when it starts, so attach first. The
+# directory stays when this stops or restarts, and mihomo picks up the new maps.
+Before=mihomo.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/bin/socketowner -reader-group mihomo -exec-paths attach
+ExecStop=/usr/local/bin/socketowner detach
+
+# Loading and attaching cgroup BPF programs takes CAP_BPF and CAP_NET_ADMIN; CAP_CHOWN
+# gives the maps to the mihomo group. -exec-paths also records each process's executable,
+# so that mihomo needn't read other processes' /proc entries, and the process that sends
+# on a connected socket. Those programs are LSM programs that read kernel structures,
+# which takes CAP_PERFMON and lets them read kernel memory. They are fixed and checked by
+# the kernel's verifier, and the loader exits once they are attached. Without
+# -exec-paths, drop CAP_PERFMON and see "Process lookup" in README.md.
+CapabilityBoundingSet=CAP_BPF CAP_PERFMON CAP_NET_ADMIN CAP_CHOWN
+NoNewPrivileges=yes
+SystemCallFilter=@system-service bpf
+SystemCallArchitectures=native
+
+# The loader runs as root to pin in /sys/fs/bpf, whose root directory is root's alone.
+# ProtectKernelTunables= would make /sys/fs/bpf read-only too, and ReadWritePaths= can't
+# undo that, so the same paths are made read-only here with bpffs as the exception.
+# Attaching only opens /sys/fs/cgroup.
+ProtectSystem=strict
+ReadOnlyPaths=/sys /proc/sys /proc/sysrq-trigger /proc/fs /proc/irq
+ReadOnlyPaths=-/proc/acpi -/proc/latency_stats -/proc/timer_stats
+ReadWritePaths=/sys/fs/bpf
+ProtectControlGroups=yes
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+PrivateNetwork=yes
+RestrictAddressFamilies=AF_UNIX
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+UMask=0077
+
+# No [Install] section: mihomo-process-generator makes mihomo start this whenever
+# process lookup is on. In BPF-only mode mihomo requires it; in /proc mode mihomo
+# starts without it if attaching fails.
