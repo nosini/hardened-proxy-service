@@ -17,7 +17,8 @@ with an nftables kill switch and an SELinux policy.
   `PROCESS-PATH` rules. It needs the kernel's BPF LSM; see
   [Process lookup](#process-lookup).
 - `mihomo.te`, `mihomo.fc` and `mihomo.if` confine mihomo to `mihomo_t`, and
-  socketowner to `socketowner_t`.
+  socketowner to `socketowner_t`. The optional Wine observer has its own
+  `socketowner_wine_t` domain.
 - `mihomo-v6-direct.service` and its two scripts are optional. They add source-based routing
   rules so that mihomo's direct IPv6 connections from the uplink's own prefixes use the main
   routing table instead of looping back into the TUN. The rules follow prefix changes.
@@ -292,7 +293,72 @@ sudo systemctl stop socketowner.service
 sudo systemctl restart mihomo.service
 ```
 
+### Wine process attribution
+
+The optional `socketowner-wine-observer.service` runs continuously and discovers
+wineservers and their sandbox pastas. It lets a compatible mihomo build match
+Windows executable names with `PROCESS-NAME`. Native process lookup continues
+through `socketowner.service`. This currently requires the
+`wine-process-attribution` branches of socketowner and mihomo; the observer is
+still experimental. See socketowner's
+[Wine attribution documentation](https://github.com/nosini/socketowner/tree/wine-process-attribution/experiments/wine)
+for capture limits, unknown flows and DNS handling.
+
+From the socketowner checkout, build and install the observer:
+
+```sh
+CGO_ENABLED=0 go build -o socketowner-wine-observer ./experiments/wine/cmd/socketowner-wine-observer
+sudo install -m 755 socketowner-wine-observer /usr/local/bin/socketowner-wine-observer
+```
+
+Then, from this checkout, update the policy and install the unit:
+
+```sh
+make -f /usr/share/selinux/devel/Makefile mihomo.pp
+sudo semodule -i mihomo.pp
+sudo restorecon -v /usr/local/bin/socketowner-wine-observer
+sudo install -m 644 socketowner-wine-observer.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now socketowner-wine-observer.service
+```
+
+Enabling adds a want to `mihomo.service`. The observer starts after the native
+loader and before mihomo, and signals readiness only after its hooks and maps are
+ready. Start it before launching games. It restarts with the native loader, whose
+detach removes all maps in their shared directory. Following a crash, it waits six
+seconds before restarting so it can replace the old heartbeat and pins.
+
+The observer runs as root in `socketowner_wine_t`, separate from the oneshot
+loader's domain. Its capability set includes `CAP_SYS_PTRACE` and
+`CAP_DAC_READ_SEARCH` to discover pasta through other users' process fd links,
+as well as `CAP_BPF`, `CAP_PERFMON`, `CAP_NET_ADMIN` and `CAP_CHOWN`. It sees the
+host network namespace and process links. SELinux grants read-only process
+inspection, not process tracing or opening other processes' memory files. Wine,
+pasta and games stay unprivileged. Published maps remain root-owned, with read
+access for the mihomo group.
+
+Check its state and recent discoveries with:
+
+```sh
+sudo systemctl status socketowner-wine-observer.service
+sudo journalctl -u socketowner-wine-observer.service -n 30
+```
+
+Stopping the observer removes its Wine maps on a clean exit; a crash leaves stale
+records until restart. mihomo treats stale records as `wine-unknown`. New flows
+without a Wine record can still match the pasta process, so retain an appropriate
+fallback rule. Decide DNS exceptions before adding a blanket `wine-unknown`
+rejection. Disabling this optional service leaves native process lookup available:
+
+```sh
+sudo systemctl disable --now socketowner-wine-observer.service
+```
+
 ## Updating
+
+Version 1.9 adds the optional Wine observer's domain and unit. For Wine attribution,
+follow [Wine process attribution](#wine-process-attribution); native process lookup
+needs no additional unit.
 
 Version 1.8 renames the loader from `mihomo-sockowner` to `socketowner`, along with its
 unit and SELinux types. Stop mihomo and the old loader, remove both old files, then build
