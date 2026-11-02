@@ -298,16 +298,15 @@ sudo systemctl restart mihomo.service
 The optional `socketowner-wine-observer.service` runs continuously and discovers
 wineservers and their sandbox pastas. It lets a compatible mihomo build match
 Windows executable names with `PROCESS-NAME`. Native process lookup continues
-through `socketowner.service`. This currently requires the
-`wine-process-attribution` branches of socketowner and mihomo; the observer is
-still experimental. See socketowner's
-[Wine attribution documentation](https://github.com/nosini/socketowner/tree/wine-process-attribution/experiments/wine)
+through `socketowner.service`. The observer and reader are available on the
+`main` branches of socketowner and mihomo. See socketowner's
+[Wine attribution documentation](https://github.com/nosini/socketowner/tree/main/wine)
 for capture limits, unknown flows and DNS handling.
 
 From the socketowner checkout, build and install the observer:
 
 ```sh
-CGO_ENABLED=0 go build -o socketowner-wine-observer ./experiments/wine/cmd/socketowner-wine-observer
+CGO_ENABLED=0 go build -o socketowner-wine-observer ./wine/cmd/socketowner-wine-observer
 sudo install -m 755 socketowner-wine-observer /usr/local/bin/socketowner-wine-observer
 ```
 
