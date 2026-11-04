@@ -297,7 +297,7 @@ sudo systemctl restart mihomo.service
 
 The optional `socketowner-wine-observer.service` runs continuously and discovers
 wineservers and their sandbox pastas. It lets a compatible mihomo build match
-Windows executable names with `PROCESS-NAME`. Native process lookup continues
+Windows executable names with `WINE-PROCESS-NAME`. Native process lookup continues
 through `socketowner.service`. The observer and reader are available on the
 `main` branches of socketowner and mihomo. See socketowner's
 [Wine attribution documentation](https://github.com/nosini/socketowner/tree/main/wine)
@@ -344,10 +344,10 @@ sudo journalctl -u socketowner-wine-observer.service -n 30
 ```
 
 Stopping the observer removes its Wine maps on a clean exit; a crash leaves stale
-records until restart. mihomo treats stale records as `wine-unknown`. New flows
-without a Wine record can still match the pasta process, so retain an appropriate
-fallback rule. Decide DNS exceptions before adding a blanket `wine-unknown`
-rejection. Disabling this optional service leaves native process lookup available:
+records until restart. mihomo treats stale records as `wine-unknown`. The
+process remains the sandbox's pasta, so a pasta rule after the Wine rules is the
+fallback for unknown flows and those without a Wine record. Decide DNS exceptions
+before adding a blanket `wine-unknown` rejection. Disabling this optional service leaves native process lookup available:
 
 ```sh
 sudo systemctl disable --now socketowner-wine-observer.service
