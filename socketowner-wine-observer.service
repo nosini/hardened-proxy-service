@@ -13,6 +13,10 @@ Restart=on-failure
 # A killed observer leaves pins; wait past the five-second heartbeat expiry.
 RestartSec=6
 TimeoutStartSec=30
+# Each Wine socket logs a few JSON lines. Bound bursts from a game opening many,
+# below journald's default of 10000 per 30 seconds.
+LogRateLimitIntervalSec=30s
+LogRateLimitBurst=2000
 CapabilityBoundingSet=CAP_BPF CAP_PERFMON CAP_NET_ADMIN CAP_CHOWN CAP_SYS_PTRACE CAP_DAC_READ_SEARCH
 NoNewPrivileges=yes
 SystemCallFilter=@system-service bpf
