@@ -1,4 +1,4 @@
-policy_module(mihomo, 1.9)
+policy_module(mihomo, 1.10)
 
 type mihomo_t;
 type mihomo_exec_t;
@@ -127,6 +127,7 @@ allow mihomo_t kernel_t:system module_request;
 
 gen_require(`
     type bpf_t;
+    type security_t;
 ')
 
 allow socketowner_t self:capability { chown net_admin };
@@ -147,6 +148,11 @@ fs_manage_bpf_dirs(socketowner_t)
 fs_manage_bpf_files(socketowner_t)
 # Looking up the mihomo group
 auth_read_passwd(socketowner_t)
+# With -exec-paths the loader refuses to attach unless bpf is listed in
+# /sys/kernel/security/lsm. securityfs is labelled like selinuxfs here; only file
+# read is granted, not policy loading or enforcement changes.
+allow socketowner_t security_t:dir search;
+allow socketowner_t security_t:file { getattr open read };
 
 # mihomo reads the maps through the bind mount of /sys/fs/bpf/mihomo/maps. The socket
 # owners are keyed by network namespace, whose cookie mihomo gets with
@@ -173,6 +179,9 @@ allow socketowner_wine_t bpf_t:filesystem getattr;
 fs_manage_bpf_dirs(socketowner_wine_t)
 fs_manage_bpf_files(socketowner_wine_t)
 auth_read_passwd(socketowner_wine_t)
+# The observer also checks /sys/kernel/security/lsm before attaching its LSM hooks.
+allow socketowner_wine_t security_t:dir search;
+allow socketowner_wine_t security_t:file { getattr open read };
 # mihomo can read routing maps made by the observer's separate domain.
 allow mihomo_t socketowner_wine_t:bpf map_read;
 
