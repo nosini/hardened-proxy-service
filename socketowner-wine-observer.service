@@ -8,7 +8,10 @@ Before=mihomo.service
 [Service]
 Type=notify
 NotifyAccess=main
-ExecStart=/usr/local/bin/socketowner-wine-observer -pin /sys/fs/bpf/mihomo/maps -reader-group mihomo
+# mihomo-process-generator replaces the group name with its numeric GID in a drop-in, so
+# the observer needs no /etc to look it up.
+Environment=READER_GROUP=mihomo
+ExecStart=/usr/local/bin/socketowner-wine-observer -pin /sys/fs/bpf/mihomo/maps -reader-group ${READER_GROUP}
 Restart=on-failure
 # A killed observer leaves pins; wait past the five-second heartbeat expiry.
 RestartSec=6
@@ -17,24 +20,50 @@ TimeoutStartSec=30
 # below journald's default of 10000 per 30 seconds.
 LogRateLimitIntervalSec=30s
 LogRateLimitBurst=2000
+# CAP_SYS_PTRACE and CAP_DAC_READ_SEARCH let it follow other users' process links to find
+# each sandbox's pasta. The others load and attach the capture programs and give the
+# published maps to the reader group.
 CapabilityBoundingSet=CAP_BPF CAP_PERFMON CAP_NET_ADMIN CAP_CHOWN CAP_SYS_PTRACE CAP_DAC_READ_SEARCH
 NoNewPrivileges=yes
 SystemCallFilter=@system-service bpf
+# These reach into another process's memory or kernel state; the observer has no use for
+# them even though it holds CAP_SYS_PTRACE. SystemCallErrorNumber= makes them fail with
+# EPERM rather than kill the process.
+SystemCallFilter=~process_vm_readv process_vm_writev kcmp
+SystemCallErrorNumber=EPERM
 SystemCallArchitectures=native
 
-# The observer runs as root to pin in /sys/fs/bpf, whose root directory is root's alone.
-# ProtectKernelTunables= would make /sys/fs/bpf read-only too, and ReadWritePaths= can't
-# undo that, so the same paths are made read-only here with bpffs as the exception.
-# Attaching only opens /sys/fs/cgroup.
-ProtectSystem=strict
-ReadOnlyPaths=/sys /proc/sys /proc/sysrq-trigger /proc/fs /proc/irq
-ReadOnlyPaths=-/proc/acpi -/proc/latency_stats -/proc/timer_stats
-ReadWritePaths=/sys/fs/bpf
-ProtectControlGroups=yes
-ProtectHome=yes
-PrivateTmp=yes
+# The observer runs as root for as long as the system is up, holding CAP_SYS_PTRACE and
+# CAP_DAC_READ_SEARCH over other processes, so it gets an empty read-only root and only
+# the paths below. ProtectSystem=strict would leave the host's filesystem visible.
+TemporaryFileSystem=/:ro
+# Binding the executable on its own would have systemd create a file mount point, which
+# SELinux refuses, so its directory is bound. /etc isn't: the reader group arrives as a
+# numeric GID, and the host's secrets (shadow, mihomo's config) stay out of view, which
+# matters for a root process with CAP_DAC_READ_SEARCH.
+BindReadOnlyPaths=/usr/local/bin
+# READY=1 goes to systemd's socket, which a temporary root would hide like any other path.
+BindReadOnlyPaths=/run/systemd/notify
+# The wineserver and pasta of each sandbox, through their ns, exe and fd links.
+# ProtectProc stays at its default: hiding other processes would hide those lookups.
+BindReadOnlyPaths=/proc
+# The cgroup whose egress hook it attaches, the kernel BTF its programs are relocated
+# against, and the LSM list it checks before attaching them.
+BindReadOnlyPaths=/sys/fs/cgroup /sys/kernel/btf /sys/kernel/security
+# Its Wine maps are pinned next to socketowner's; bpffs is the only writable path.
+BindPaths=/sys/fs/bpf
+# ProtectKernelTunables= would make /sys/fs/bpf read-only too, so it stays off. The
+# temporary root already makes everything else on its list read-only, but the two files
+# it hides are readable through the /proc bind, so they are hidden here.
+InaccessiblePaths=-/proc/kallsyms -/proc/kcore
+# /dev/null for standard input, and none of the host's other devices.
 PrivateDevices=yes
 RestrictAddressFamilies=AF_UNIX AF_INET
+# The only socket it makes reads the host's namespace cookie with
+# getsockopt(SO_NETNS_COOKIE) and is never bound or connected, so no network is needed.
+# PrivateNetwork= would hide the host namespace, so it stays off.
+IPAddressDeny=any
+SocketBindDeny=any
 ProtectKernelModules=yes
 ProtectKernelLogs=yes
 ProtectClock=yes
@@ -46,8 +75,5 @@ LockPersonality=yes
 MemoryDenyWriteExecute=yes
 UMask=0077
 
-# The observer needs the host network namespace cookie, so no PrivateNetwork.
-# Process fd links must stay visible; executable and namespace links suffice.
-
-[Install]
-WantedBy=mihomo.service
+# No [Install] section: mihomo-process-generator starts the observer with mihomo whenever
+# process lookup is on, since it only matters to readers that are looking processes up.

@@ -20,15 +20,23 @@ ExecStop=/usr/local/bin/socketowner detach
 CapabilityBoundingSet=CAP_BPF CAP_PERFMON CAP_NET_ADMIN CAP_CHOWN
 NoNewPrivileges=yes
 SystemCallFilter=@system-service bpf
+# process_vm_readv, process_vm_writev and kcmp reach into another process's memory or
+# kernel state. The loader needs none of them; the observer, which runs with
+# CAP_SYS_PTRACE, denies them too.
+SystemCallFilter=~process_vm_readv process_vm_writev kcmp
+SystemCallErrorNumber=EPERM
 SystemCallArchitectures=native
 
 # The loader runs as root to pin in /sys/fs/bpf, whose root directory is root's alone.
 # ProtectKernelTunables= would make /sys/fs/bpf read-only too, and ReadWritePaths= can't
-# undo that, so the same paths are made read-only here with bpffs as the exception.
-# Attaching only opens /sys/fs/cgroup.
+# undo that, so its paths are spelled out here with bpffs as the exception: /sys and the
+# /proc entries it makes read-only, and the two it hides. Entries whose path a kernel may
+# lack are marked with -. Attaching only opens /sys/fs/cgroup.
 ProtectSystem=strict
 ReadOnlyPaths=/sys /proc/sys /proc/sysrq-trigger /proc/fs /proc/irq
-ReadOnlyPaths=-/proc/acpi -/proc/latency_stats -/proc/timer_stats
+ReadOnlyPaths=-/proc/acpi -/proc/apm -/proc/asound -/proc/bus -/proc/latency_stats
+ReadOnlyPaths=-/proc/mtrr -/proc/scsi -/proc/timer_stats
+InaccessiblePaths=-/proc/kallsyms -/proc/kcore
 ReadWritePaths=/sys/fs/bpf
 ProtectControlGroups=yes
 ProtectHome=yes
