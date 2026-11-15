@@ -1,4 +1,4 @@
-policy_module(mihomo, 1.10)
+policy_module(mihomo, 1.11)
 
 type mihomo_t;
 type mihomo_exec_t;
@@ -15,15 +15,40 @@ init_daemon_domain(socketowner_t, socketowner_exec_t)
 files_type(mihomo_conf_t)
 files_type(mihomo_data_t)
 
-# Allow both process-lookup methods in SELinux. The systemd generator selects the
-# available methods through the service's mounts, process visibility and capabilities.
+## <desc>
+## <p>
+## Allow mihomo to find out which process owns a connection by searching /proc, for
+## kernels without the BPF LSM that socketowner needs. This lets it read the links of every
+## process under /proc. Enable it only with find-process-bpf-only: false.
+## </p>
+## </desc>
+gen_tunable(mihomo_find_process_proc, false)
+
+## <desc>
+## <p>
+## Allow mihomo to ask the kernel to load the modules it uses, such as tun and the
+## nftables expressions. Install the modules-load.d file instead where possible.
+## </p>
+## </desc>
+gen_tunable(mihomo_load_modules, false)
+
+## <desc>
+## <p>
+## Allow mihomo to run iptables to set up its TPROXY redirect rules. Only needed with a
+## nonzero tproxy-port.
+## </p>
+## </desc>
+gen_tunable(mihomo_use_iptables, false)
+
+# Process lookup through the BPF maps stays allowed. /proc lookup is behind
+# mihomo_find_process_proc; the systemd generator selects the service's sandbox and warns
+# when /proc is selected but the boolean is off.
 
 domain_getattr_all_domains(mihomo_t)
 
 gen_require(`
     type cgroup_t;
     type dns_port_t;
-    type http_port_t;
     type init_t;
     type iptables_exec_t;
     type node_t;
@@ -42,7 +67,6 @@ allow mihomo_t self:udp_socket { bind connect create getattr ioctl read setopt w
 allow mihomo_t self:tun_socket create;
 allow mihomo_t self:netlink_route_socket { bind create getattr nlmsg_read nlmsg_write read setopt write };
 allow mihomo_t self:netlink_netfilter_socket { bind create getattr getopt read write };
-allow mihomo_t self:netlink_tcpdiag_socket { bind create getattr getopt nlmsg_read read write };
 
 allow mihomo_t node_t:tcp_socket node_bind;
 allow mihomo_t node_t:udp_socket node_bind;
@@ -59,7 +83,10 @@ allow mihomo_t unreserved_port_t:tcp_socket name_bind;
 allow mihomo_t unreserved_port_t:udp_socket name_bind;
 
 allow mihomo_t tun_tap_device_t:chr_file { getattr ioctl open read write };
-allow mihomo_t iptables_exec_t:file { execute execute_no_trans getattr open read };
+# Only TPROXY redirects need to run iptables; see mihomo_use_iptables.
+tunable_policy(`mihomo_use_iptables',`
+    allow mihomo_t iptables_exec_t:file { execute execute_no_trans getattr open read };
+')
 
 allow mihomo_t mihomo_conf_t:dir { list_dir_perms watch };
 allow mihomo_t mihomo_conf_t:file read_file_perms;
@@ -101,24 +128,30 @@ allow mihomo_t proc_net_t:dir { getattr open read search };
 kernel_read_network_state(mihomo_t)
 kernel_read_system_state(mihomo_t)
 
-# Process lookup finds the socket's inode through netlink, then searches the fd links
-# under /proc/<pid>/fd of the processes with the socket's UID and reads the owner's exe
-# link. Those links belong to other users, so it needs CAP_DAC_READ_SEARCH to list
-# them and CAP_SYS_PTRACE to read them. The kernel checks reading them as a read-only
-# ptrace access, which SELinux grants through file read on the process's domain.
-# Without open on those files and without the ptrace permission, mihomo can't open other
-# processes' environ, cmdline or mem.
+# Process lookup through /proc finds the socket's inode by dumping TCP sockets through
+# netlink, then searches the fd links under /proc/<pid>/fd of the processes with the
+# socket's UID and reads the owner's exe link. Those links belong to other users, so it
+# needs CAP_DAC_READ_SEARCH to list them and CAP_SYS_PTRACE to read them. The kernel checks
+# reading them as a read-only ptrace access, which SELinux grants through file read on the
+# process's domain. Without open on those files and without the ptrace permission, mihomo
+# can't open other processes' environ, cmdline or mem.
 # What this can't take away: /proc/<pid>/root and cwd are links of the same kind as exe,
 # so a compromised mihomo can reach files outside its sandbox through them. Its own type
 # enforcement still decides which of those files it can read.
-allow mihomo_t self:capability { dac_read_search sys_ptrace };
-allow mihomo_t self:cap_userns sys_ptrace;
-allow mihomo_t domain:dir { getattr open read search };
-allow mihomo_t domain:lnk_file { getattr read };
-allow mihomo_t domain:file read;
+tunable_policy(`mihomo_find_process_proc',`
+    allow mihomo_t self:netlink_tcpdiag_socket { bind create getattr getopt nlmsg_read read write };
+    allow mihomo_t self:capability { dac_read_search sys_ptrace };
+    allow mihomo_t self:cap_userns sys_ptrace;
+    allow mihomo_t domain:dir { getattr open read search };
+    allow mihomo_t domain:lnk_file { getattr read };
+    allow mihomo_t domain:file read;
+')
 
-# Kernel module loading for nftables expressions and TUN device
-allow mihomo_t kernel_t:system module_request;
+# Kernel module loading for nftables expressions and the TUN device. The modules-load.d
+# file loads them at boot; this is only for systems that can't or don't.
+tunable_policy(`mihomo_load_modules',`
+    allow mihomo_t kernel_t:system module_request;
+')
 
 ########################################
 #

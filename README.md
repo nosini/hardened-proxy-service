@@ -5,13 +5,17 @@ with an nftables kill switch and an SELinux policy.
 
 - `mihomo.service` runs mihomo as an unprivileged `mihomo` user in an empty, read-only root.
   Only `/usr`, the trust stores and `/etc/mihomo` are visible. Of those, only `ruleset/`,
-  `cache.db` and `geoip.metadb` are writable. `/etc/hosts` and `/etc/resolv.conf` are not,
-  so configure mihomo's DNS servers explicitly. In BPF-only mode, other users' processes
-  are hidden; it learns which process owns a connection from socketowner.
+  `cache.db` and `geoip.metadb` are writable, and nothing but mihomo itself, the unit's
+  fail-closed `/usr/bin/false` and the loader and libc `/usr/bin/false` needs may be
+  executed. `/etc/hosts` and `/etc/resolv.conf` are not mounted, so configure mihomo's DNS
+  servers explicitly. In BPF-only mode, other users' processes are hidden; it learns which
+  process owns a connection from socketowner.
 - `killswitch.service` loads `nftables-killswitch.conf` before the network comes up. It
   drops anything that doesn't go through the TUN device, except mihomo's own sockets and
-  the local addresses you allow in `/etc/nftables-killswitch.d/`. If mihomo stops, nothing
-  leaks. If the rules fail to load, everything but loopback stays blocked.
+  the local addresses you allow in `/etc/nftables-killswitch.d/`. It filters forwarded
+  traffic too, so bridged containers and VMs can't use the physical uplink directly. If
+  mihomo stops, nothing leaks. If the rules fail to load, everything but loopback stays
+  blocked.
 - `socketowner.service` attaches small BPF programs that record which process opened
   each connection and which program each process runs, for `PROCESS-NAME` and
   `PROCESS-PATH` rules. It needs the kernel's BPF LSM; see
@@ -45,6 +49,8 @@ sudo restorecon -v /usr/local/bin/mihomo
 
 sudo install -m 644 mihomo.tmpfiles /etc/tmpfiles.d/mihomo.conf
 sudo systemd-tmpfiles --create /etc/tmpfiles.d/mihomo.conf
+
+sudo install -m 644 mihomo.modules-load /etc/modules-load.d/mihomo.conf
 ```
 
 Write the config. `config.example.yaml` matches the unit and the kill switch:
@@ -77,6 +83,24 @@ echo 'add element inet killswitch direct4 { 192.168.1.0/24 }' |
 IPv6 addresses go in `direct6` the same way, for example
 `add element inet killswitch direct6 { fd00:1::/64 }`.
 
+The `forward` chain filters traffic the host forwards, such as containers and VMs on a
+bridge: only established flows, the TUN and `direct4`/`direct6` pass. VMs attached with
+macvlan or macvtap send through the uplink without passing the host's forward hook, so the
+kill switch can't see them; filter inside the VM or don't give it an uplink. With
+`br_netfilter` loaded (`bridge-nf-call-iptables` = 1), traffic bridged between the ports of
+a bridge does pass this hook and is dropped. If VMs on such a bridge should reach the
+network directly, allow the bridge in a file under `/etc/nftables-killswitch.d/`:
+
+```sh
+echo 'add rule inet killswitch forward iifname "br0" oifname "br0" accept' |
+    sudo tee /etc/nftables-killswitch.d/bridge.conf
+```
+
+Only frames that stay on that bridge match; routing from it to the uplink stays blocked. On IPv6 the
+output and input chains allow only what the uplink needs: neighbor discovery, router
+solicitation, MLD and DHCPv6 to `ff02::1:2` or a link-local server. mDNS isn't allowed.
+DHCPv4 is limited to broadcasts and the LAN addresses in `direct4`.
+
 Then install the kill switch, units and generator:
 
 ```sh
@@ -92,6 +116,13 @@ sudo systemctl daemon-reload
 The generator goes in `/etc`, not `/usr/local`: systemd runs generators at boot before it
 mounts file systems other than `/` and `/usr`, and `/usr/local` is often one of them (a
 btrfs subvolume on openSUSE). Without the generator, mihomo doesn't start.
+
+The generator also adds `CAP_NET_BIND_SERVICE` when a listener port is below 1024:
+`dns.listen`, `mixed-port`, `port`, `socks-port`, `redir-port`, `tproxy-port` or
+`external-controller` (`host:port`, including `[::]:53`). Higher ports run without it.
+
+The modules-load file loads `tun` at boot; see
+[Kernel modules and TPROXY](#kernel-modules-and-tproxy).
 
 The example uses BPF-only process lookup. Before starting mihomo, install
 socketowner as described in [Process lookup](#process-lookup), or set
@@ -137,14 +168,16 @@ drop-in for `mihomo.service`:
 | --- | --- |
 | `find-process-mode: off` | Other users' processes hidden; no BPF maps or inspection capabilities |
 | `find-process-bpf-only: true` with matching enabled | Other users' processes hidden; requires socketowner and its maps |
+| `find-process-bpf-only` absent with matching enabled | With `find-process-bpf-map: /run/mihomo-bpf/conn_owners`, the BPF-only sandbox; otherwise as `off`, so lookups fail. `/proc` is never granted |
 | `find-process-bpf-only: false` with matching enabled | Processes visible; adds `CAP_SYS_PTRACE` and `CAP_DAC_READ_SEARCH`; starts socketowner, whose maps are optional |
 
-Matching is enabled with `always` or `strict` (mihomo's default). If
-`find-process-bpf-only` is absent or false, mihomo permits `/proc` fallback. It still
-tries BPF first: the owner and executable path if recorded, otherwise the BPF owner's
-`/proc/<pid>/exe`. If that fails or BPF has no owner, it falls back to netlink and a
-`/proc` search. The generator grants the permissions needed for these fallbacks.
-SELinux allows both lookup methods; the generator controls the service's access.
+Matching is enabled with `always` or `strict` (mihomo's default). Only an explicit
+`find-process-bpf-only: false` selects the `/proc` fallback. Mihomo then tries BPF first:
+the owner and executable path if recorded, otherwise the BPF owner's `/proc/<pid>/exe`. If
+that fails or BPF has no owner, it falls back to netlink and a `/proc` search. Leaving the
+key out uses the BPF-only sandbox when `find-process-bpf-map:
+/run/mihomo-bpf/conn_owners` is set. Without that map path, as in an upstream config,
+mihomo runs with no lookup privileges and its process rules don't match.
 
 An omitted `find-process-bpf-map` uses mihomo's default map path; an explicitly empty
 value disables BPF lookup. Currently the generator still permits `bpf()` in every
@@ -257,13 +290,18 @@ command line or memory. It can't stop mihomo from following their `root` and `cw
 though, which work the same way as `exe`. Through them a compromised mihomo can reach files
 outside its sandbox, as far as `mihomo_t` may read them.
 
-To use it, set `find-process-bpf-only: false` in `config.yaml`. The generator adds the
-two capabilities and makes the process entries visible:
+To use it, set `find-process-bpf-only: false` in `config.yaml` and enable the SELinux
+boolean, which the policy leaves off by default:
 
 ```sh
+sudo setsebool -P mihomo_find_process_proc on
 sudo systemctl daemon-reload
 sudo systemctl restart mihomo.service
 ```
+
+The generator adds the two capabilities and makes the process entries visible. It can't set
+booleans: while `mihomo_find_process_proc` is off it logs a warning at boot with the
+`setsebool` command, and `/proc` lookup then fails with AVC denials.
 
 The generator starts socketowner in this mode too. Without the BPF LSM it can still
 record which process owns each connection, though not what each process runs. That keeps
@@ -353,7 +391,55 @@ before adding a blanket `wine-unknown` rejection. Disabling this optional servic
 sudo systemctl disable --now socketowner-wine-observer.service
 ```
 
+## Kernel modules and TPROXY
+
+mihomo uses the `tun` module and nftables expressions. The `mihomo.modules-load` file loads
+`tun` at boot, so mihomo doesn't have to ask the kernel for it. If mihomo logs a failure to
+load a module or an AVC for `module_request`, add that module's name to
+`/etc/modules-load.d/mihomo.conf`, or enable `mihomo_load_modules` if you can't load it at
+boot:
+
+```sh
+sudo setsebool -P mihomo_load_modules on
+```
+
+TPROXY, with a nonzero `tproxy-port`, makes mihomo run `iptables` to set up its redirect
+rules. The policy grants that only with `mihomo_use_iptables`, which is off by default:
+
+```sh
+sudo setsebool -P mihomo_use_iptables on
+```
+
+The generator warns at boot when `tproxy-port` is set and the boolean is off. It also
+lifts the unit's `NoExecPaths=` restriction for TPROXY, since `iptables` and its libraries
+must run; SELinux still allows exec only of `iptables` and only with the boolean.
+
 ## Updating
+
+Version 1.11 confines `/proc` lookup and `iptables` behind SELinux booleans, stops mihomo
+from loading kernel modules itself, grants `CAP_NET_BIND_SERVICE` from the generator instead
+of the unit, and filters forwarded traffic. On upgrade, install the modules-load file, the
+policy, the unit and the generator, then reload the kill switch and restart mihomo.
+Users in `/proc` lookup mode must also enable `mihomo_find_process_proc`; TPROXY users must
+enable `mihomo_use_iptables`. A config without `find-process-bpf-only` no longer gets `/proc`
+lookup: add `find-process-bpf-map: /run/mihomo-bpf/conn_owners`, as in
+`config.example.yaml`, for BPF lookup, or set `find-process-bpf-only: false` to keep `/proc`
+lookup.
+
+```sh
+sudo install -m 644 mihomo.modules-load /etc/modules-load.d/mihomo.conf
+make -f /usr/share/selinux/devel/Makefile mihomo.pp
+sudo semodule -i mihomo.pp
+sudo setsebool -P mihomo_find_process_proc on   # only for /proc lookup
+sudo setsebool -P mihomo_use_iptables on        # only for TPROXY
+sudo install -m 644 nftables-killswitch.conf /etc/nftables-killswitch.conf
+sudo install -m 644 mihomo.service /etc/systemd/system/
+sudo install -D -m 755 mihomo-process-generator \
+    /etc/systemd/system-generators/mihomo-process-generator
+sudo systemctl daemon-reload
+sudo systemctl reload killswitch.service
+sudo systemctl restart mihomo.service
+```
 
 Version 1.9 adds the optional Wine observer's domain and unit. For Wine attribution,
 follow [Wine process attribution](#wine-process-attribution); native process lookup

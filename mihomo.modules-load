@@ -1,0 +1,3 @@
+# Load the TUN module at boot so mihomo doesn't have to ask the kernel for it
+# (module_request, behind mihomo_load_modules). Kernels with it built in ignore this.
+tun
