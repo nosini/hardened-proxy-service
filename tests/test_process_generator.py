@@ -23,6 +23,10 @@ class GeneratorTests(unittest.TestCase):
         self.root = Path(self.temp.name)
         self.config = self.root / "config.yaml"
         self.output = self.root / "generated"
+        self.observer = self.root / "socketowner-wine-observer.service"
+        patcher = patch.object(generator, "OBSERVER", self.observer)
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     def generate(self, config):
         self.config.write_text(config)
@@ -31,6 +35,9 @@ class GeneratorTests(unittest.TestCase):
             status = generator.generate(self.output, self.config)
         contents = (self.output / "mihomo.service.d/50-process-lookup.conf").read_text()
         return status, contents, errors.getvalue()
+
+    def install_observer(self):
+        self.observer.write_text("[Unit]\n")
 
     def booleans(self, **values):
         directory = Path(tempfile.mkdtemp(dir=self.root))
@@ -49,6 +56,7 @@ class GeneratorTests(unittest.TestCase):
         self.assertIn("Requires=socketowner.service", unit)
         self.assertIn("After=socketowner.service", unit)
         self.assertIn("BindReadOnlyPaths=/sys/fs/bpf/mihomo/maps:/run/mihomo-bpf", unit)
+        self.assertIn("SystemCallFilter=bpf", unit)
         self.assertNotIn("SYS_PTRACE", unit)
         self.assertNotIn("ProtectProc=default", unit)
         self.assertIn("ExecStart=/usr/local/bin/mihomo", unit)
@@ -63,6 +71,7 @@ class GeneratorTests(unittest.TestCase):
         self.assertNotIn("CAP_NET_BIND_SERVICE", unit)
         self.assertNotIn("Requires=", unit)
         self.assertIn("Wants=socketowner.service", unit)
+        self.assertIn("SystemCallFilter=bpf", unit)
         self.assertIn("BindReadOnlyPaths=-/sys/fs/bpf/mihomo/maps:/run/mihomo-bpf", unit)
 
     def test_absent_bpf_only_uses_bpf_sandbox(self):
@@ -161,6 +170,66 @@ class GeneratorTests(unittest.TestCase):
                 self.assertNotIn("SYS_PTRACE", unit)
                 self.assertNotIn("BindReadOnlyPaths", unit)
                 self.assertNotIn("socketowner", unit)
+                self.assertNotIn("SystemCallFilter", unit)
+
+    def test_bpf_syscall_is_only_allowed_with_lookup(self):
+        bpf = "find-process-bpf-map: /run/mihomo-bpf/conn_owners\n"
+        for config in ("find-process-mode: off\n", "mixed-port: 7891\n"):
+            with self.subTest(config=config):
+                status, unit, errors = self.generate(config)
+                self.assertEqual(status, 0, errors)
+                self.assertNotIn("SystemCallFilter=bpf", unit)
+        for config in ("find-process-mode: always\n" + bpf,
+                       "find-process-bpf-only: false\n"):
+            with self.subTest(config=config):
+                status, unit, errors = self.generate(config)
+                self.assertEqual(status, 0, errors)
+                self.assertIn("SystemCallFilter=bpf", unit)
+
+    def test_observer_is_wanted_only_when_installed_and_lookup_is_on(self):
+        bpf = "find-process-bpf-map: /run/mihomo-bpf/conn_owners\n"
+        for config in ("find-process-mode: always\n" + bpf,
+                       "find-process-bpf-only: false\n"):
+            with self.subTest(config=config):
+                status, unit, errors = self.generate(config)
+                self.assertEqual(status, 0, errors)
+                self.assertNotIn("socketowner-wine-observer", unit)
+
+        self.install_observer()
+        for config in ("find-process-mode: always\n" + bpf,
+                       "find-process-bpf-only: false\n"):
+            with self.subTest(config=config):
+                status, unit, errors = self.generate(config)
+                self.assertEqual(status, 0, errors)
+                self.assertIn("Wants=socketowner-wine-observer.service", unit)
+                self.assertIn("After=socketowner-wine-observer.service", unit)
+
+        status, unit, errors = self.generate("find-process-mode: off\n")
+        self.assertEqual(status, 0, errors)
+        self.assertNotIn("socketowner-wine-observer", unit)
+
+    def test_observer_gets_reader_gid_when_installed(self):
+        dropin = self.output / "socketowner-wine-observer.service.d/50-reader-group.conf"
+        groups = self.root / "group"
+        groups.write_text("root:x:0:\nmihomoish:x:7:\nmihomo:x:4242:\n")
+        with patch.object(generator, "GROUP_FILE", groups):
+            self.generate("find-process-bpf-only: false\n")
+            self.assertFalse(dropin.exists())
+            self.install_observer()
+            self.generate("find-process-bpf-only: false\n")
+            self.assertEqual(dropin.read_text(),
+                             "[Service]\nEnvironment=READER_GROUP=4242\n")
+            dropin.unlink()
+            groups.write_text("root:x:0:\n")
+            self.generate("find-process-bpf-only: false\n")
+            self.assertFalse(dropin.exists())
+
+    def test_blocked_startup_never_restarts_the_placeholder(self):
+        self.assertIn("Restart=no", generator.DENY)
+        status, unit, errors = self.generate("find-process-mode: invalid\n")
+        self.assertEqual(status, 1)
+        self.assertEqual(unit, generator.DENY)
+        self.assertIn("Restart=no", unit)
 
     def test_yaml_comments_nested_settings_aliases_and_merges(self):
         status, unit, errors = self.generate(

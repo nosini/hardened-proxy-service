@@ -9,8 +9,13 @@ import sys
 CONFIG = Path("/etc/mihomo/config.yaml")
 MAP = "/run/mihomo-bpf/conn_owners"
 START = "ExecStart=\nExecStart=/usr/local/bin/mihomo -d /etc/mihomo\n"
-DENY = "[Service]\nExecStart=\nExecStart=/usr/bin/false\n"
+# Restart=no keeps a blocked startup from restarting the failing placeholder forever.
+DENY = "[Service]\nExecStart=\nExecStart=/usr/bin/false\nRestart=no\n"
 BOOLEAN_DIR = Path("/sys/fs/selinux/booleans")
+# The optional Wine observer is started with mihomo when it's installed. Its unit
+# no longer enables itself, so it doesn't start with mihomo when lookup is off.
+OBSERVER = Path("/etc/systemd/system/socketowner-wine-observer.service")
+GROUP_FILE = Path("/etc/group")
 
 
 NULL = "tag:yaml.org,2002:null"
@@ -225,6 +230,16 @@ def grants(bind_service, proc=False):
     )
 
 
+def observer_unit():
+    """Unit lines for the optional Wine observer, which the generator starts."""
+    if not OBSERVER.exists():
+        return ""
+    return (
+        "Wants=socketowner-wine-observer.service\n"
+        "After=socketowner-wine-observer.service\n"
+    )
+
+
 def dropin(mode, bind_service=False, tproxy=False):
     # TPROXY runs iptables, which the base unit's exec restriction forbids;
     # SELinux still requires mihomo_use_iptables for it.
@@ -235,16 +250,22 @@ def dropin(mode, bind_service=False, tproxy=False):
 def _dropin(mode, bind_service):
     if mode == "bpf":
         return (
-            "[Unit]\nRequires=socketowner.service\nAfter=socketowner.service\n"
+            "[Unit]\nRequires=socketowner.service\nAfter=socketowner.service\n" +
+            observer_unit() +
             "\n[Service]\n" + START +
+            # bpf is only needed to read socketowner's maps; the base unit denies it.
+            "SystemCallFilter=bpf\n" +
             "BindReadOnlyPaths=/sys/fs/bpf/mihomo/maps:/run/mihomo-bpf\n" +
             grants(bind_service)
         )
     if mode == "proc":
         return (
             # Start the loader when it's installed, but run without it if it fails.
-            "[Unit]\nWants=socketowner.service\n"
+            "[Unit]\nWants=socketowner.service\n" +
+            observer_unit() +
             "\n[Service]\n" + START +
+            # Optional socket-owner acceleration uses bpf too.
+            "SystemCallFilter=bpf\n" +
             "ProtectProc=default\n" +
             grants(bind_service, proc=True) +
             # Optional socket-owner acceleration, including without -exec-paths.
@@ -292,8 +313,33 @@ def generate(output, config=CONFIG):
               "mihomo startup is blocked", file=sys.stderr)
         return 1
     target.write_text(contents)
+    reader_group(output)
     warn(configuration)
     return 0
+
+
+def reader_group(output, group="mihomo"):
+    """Give the Wine observer the reader group's GID, so its sandbox needs no /etc."""
+    if not OBSERVER.exists():
+        return
+    # Read /etc/group itself: an NSS lookup can ask systemd, which is waiting for this
+    # generator during daemon-reload, and deadlock. systemd-sysusers puts the group there.
+    gid = None
+    try:
+        for line in GROUP_FILE.read_text().splitlines():
+            fields = line.split(":")
+            if len(fields) >= 3 and fields[0] == group and fields[2].isdigit():
+                gid = int(fields[2])
+                break
+    except OSError:
+        pass
+    if gid is None:
+        # The unit's default, the group name, then fails visibly in the observer.
+        return
+    directory = output / "socketowner-wine-observer.service.d"
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / "50-reader-group.conf").write_text(
+        f"[Service]\nEnvironment=READER_GROUP={gid}\n")
 
 
 if __name__ == "__main__":

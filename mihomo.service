@@ -14,6 +14,10 @@ ExecStart=/usr/bin/false
 Restart=on-failure
 RestartSec=5
 LimitNOFILE=1048576
+# Generous bounds against a runaway process, not a working-set target: mihomo
+# needs one thread per active connection and buffers traffic in memory.
+TasksMax=16384
+MemoryMax=4G
 
 # CAP_NET_RAW dropped (no AF_PACKET / raw-socket use). Restore on both lines
 # if transparent proxy or raw sockets break.
@@ -23,9 +27,18 @@ CapabilityBoundingSet=CAP_NET_ADMIN
 AmbientCapabilities=CAP_NET_ADMIN
 NoNewPrivileges=yes
 
-# bpf is for reading the maps of socketowner.service; see "Process lookup" in README.md.
-SystemCallFilter=@system-service bpf
+SystemCallFilter=@system-service
+# @system-service includes @ipc (process_vm_readv/writev), @keyring, @memlock,
+# @setuid and @chown. Mihomo and the Go runtime need none of them: no keyrings,
+# no mlock, credentials come from systemd, and the files mihomo writes (cache.db,
+# ruleset) are already owned by its user. Denying the process_vm calls matters in
+# /proc mode, where CAP_SYS_PTRACE and the host PID namespace would otherwise let a
+# compromised mihomo read or write other processes' memory. kcmp compares other
+# processes' file descriptors, which process lookup does not need.
+# EPERM makes a denied call fail softly instead of killing the process.
+SystemCallFilter=~process_vm_readv process_vm_writev kcmp @keyring @memlock @setuid @chown
 SystemCallFilter=~open_by_handle_at name_to_handle_at kexec_load kexec_file_load swapon swapoff
+SystemCallErrorNumber=EPERM
 SystemCallArchitectures=native
 
 TemporaryFileSystem=/:ro
@@ -68,11 +81,17 @@ RestrictSUIDSGID=yes
 RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
 LockPersonality=yes
 PrivateUsers=no
+# Mihomo has no use for kernel keyrings; give it its own session keyring instead
+# of the host's. The syscall filter denies the keyring operations themselves.
+KeyringMode=private
 
 ProtectClock=yes
 ProtectKernelLogs=yes
 ProtectHostname=yes
 PrivateTmp=yes
+# No SysV IPC or POSIX message queues are shared with the host; mihomo uses
+# neither (its own Unix sockets are unaffected).
+PrivateIPC=yes
 RemoveIPC=yes
 UMask=0077
 RuntimeDirectory=mihomo
