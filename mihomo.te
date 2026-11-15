@@ -1,4 +1,4 @@
-policy_module(mihomo, 1.11)
+policy_module(mihomo, 1.12)
 
 type mihomo_t;
 type mihomo_exec_t;

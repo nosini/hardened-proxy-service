@@ -22,7 +22,13 @@ find-process-mode: always
 find-process-bpf-map: /run/mihomo-bpf/conn_owners
 find-process-bpf-only: true
 # Pick a port SELinux labels unreserved_port_t; the usual 9090 is websm_port_t.
+# The controller is an API that can switch mihomo to direct mode. The kill switch trusts
+# everything mihomo's UID sends, so without a secret any local process that can reach an
+# unauthenticated controller routes traffic around the tunnel. Set secret: to a long
+# random value (openssl rand -hex 32) and send it as `Authorization: Bearer <secret>`,
+# or leave the controller off.
 # external-controller: 127.0.0.1:9097
+# secret: "replace-with-openssl-rand-hex-32"
 
 profile:
   store-selected: true

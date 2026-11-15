@@ -1,8 +1,14 @@
-/usr/bin/mihomo          --    gen_context(system_u:object_r:mihomo_exec_t,s0)
-/usr/bin/socketowner     --    gen_context(system_u:object_r:socketowner_exec_t,s0)
+# The binaries are installed in /usr/local/bin, but also label the /usr/bin paths for
+# distributions (or packages) that put them there. Where the policy makes /usr/local
+# equivalent to /usr, both patterns match the same file and give it the same type.
+/usr/bin/mihomo            --   gen_context(system_u:object_r:mihomo_exec_t,s0)
+/usr/local/bin/mihomo      --   gen_context(system_u:object_r:mihomo_exec_t,s0)
+/usr/bin/socketowner       --   gen_context(system_u:object_r:socketowner_exec_t,s0)
+/usr/local/bin/socketowner --   gen_context(system_u:object_r:socketowner_exec_t,s0)
 /etc/systemd/system-generators/mihomo-process-generator -- gen_context(system_u:object_r:systemd_generic_generator_exec_t,s0)
 /etc/mihomo(/.*)?             gen_context(system_u:object_r:mihomo_conf_t,s0)
 /etc/mihomo/ruleset(/.*)?     gen_context(system_u:object_r:mihomo_data_t,s0)
 /etc/mihomo/cache\.db    --   gen_context(system_u:object_r:mihomo_data_t,s0)
 /etc/mihomo/geoip\.metadb --  gen_context(system_u:object_r:mihomo_data_t,s0)
-/usr/bin/socketowner-wine-observer -- gen_context(system_u:object_r:socketowner_wine_exec_t,s0)
+/usr/bin/socketowner-wine-observer       -- gen_context(system_u:object_r:socketowner_wine_exec_t,s0)
+/usr/local/bin/socketowner-wine-observer -- gen_context(system_u:object_r:socketowner_wine_exec_t,s0)

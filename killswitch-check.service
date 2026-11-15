@@ -1,0 +1,50 @@
+[Unit]
+Description=Check that the mihomo kill switch table is loaded
+# Check only once the kill switch and nftables have loaded; the timer starts this at boot.
+After=killswitch.service nftables.service
+
+[Service]
+Type=oneshot
+# A kill switch stopped on purpose (see README) stays stopped; don't re-add its table.
+ExecCondition=/usr/bin/systemctl is-active --quiet killswitch.service
+# `nft flush ruleset`, or a reload of nftables.service whose config begins with it, deletes
+# the table while killswitch.service stays active and mihomo's Requires= stays satisfied.
+# mihomo stopping then leaks, so put the same rules back and leave a warning in the journal.
+ExecStart=/bin/sh -c '\
+    /usr/sbin/nft list table inet killswitch >/dev/null 2>&1 || { \
+        echo "<4>killswitch-check: table inet killswitch is missing, loading it again" >&2; \
+        /usr/sbin/nft -f /etc/nftables-killswitch.conf; }'
+
+# Running every 10 s, systemd's own start/finish messages would flood the journal.
+# LogLevelMax= also drops those; the <4> prefix keeps the missing-table message, a warning.
+LogLevelMax=notice
+
+# nft reaches the kernel through netlink and needs CAP_NET_ADMIN to add the table again.
+# Root gets nothing else, and the filter keeps the rest of the kernel interfaces closed.
+CapabilityBoundingSet=CAP_NET_ADMIN
+NoNewPrivileges=yes
+SystemCallFilter=@system-service
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_UNIX AF_NETLINK
+RestrictNamespaces=yes
+
+# No PrivateNetwork=: nftables state belongs to a network namespace, so a private one
+# would show no table and take the rules where they do nothing.
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+ProtectKernelLogs=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+UMask=0077
+
+# No [Install] section: killswitch-check.timer starts this; enabling the service too would
+# also run it at boot on its own.

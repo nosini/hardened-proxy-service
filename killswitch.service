@@ -1,5 +1,9 @@
 [Unit]
 Description=mihomo kill switch
+# Stock nftables.conf starts with `flush ruleset`, which deletes this table. Load after
+# nftables.service so its own load can't wipe what we add. A reload of nftables.service or
+# an admin's `nft flush ruleset` still can: killswitch-check.timer puts it back.
+After=nftables.service
 After=firewalld.service
 Before=network-pre.target
 Wants=network-pre.target

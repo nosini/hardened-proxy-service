@@ -15,7 +15,7 @@ with an nftables kill switch and an SELinux policy.
   the local addresses you allow in `/etc/nftables-killswitch.d/`. It filters forwarded
   traffic too, so bridged containers and VMs can't use the physical uplink directly. If
   mihomo stops, nothing leaks. If the rules fail to load, everything but loopback stays
-  blocked.
+  blocked. `killswitch-check.timer` loads them again if something flushes the table.
 - `socketowner.service` attaches small BPF programs that record which process opened
   each connection and which program each process runs, for `PROCESS-NAME` and
   `PROCESS-PATH` rules. It needs the kernel's BPF LSM; see
@@ -52,6 +52,19 @@ sudo systemd-tmpfiles --create /etc/tmpfiles.d/mihomo.conf
 
 sudo install -m 644 mihomo.modules-load /etc/modules-load.d/mihomo.conf
 ```
+
+The policy labels both `/usr/local/bin` and `/usr/bin`, since `/usr/local` isn't an
+equivalence of `/usr` on every distribution. Check the label and, after starting mihomo,
+its domain:
+
+```sh
+ls -Z /usr/local/bin/mihomo
+ps -eZ | grep mihomo
+```
+
+The first shows `mihomo_exec_t`, the second `mihomo_t`. Without the module's label, mihomo
+runs unconfined. The same applies to `socketowner` and `socketowner-wine-observer` when
+you install them.
 
 Write the config. `config.example.yaml` matches the unit and the kill switch:
 
@@ -121,6 +134,12 @@ The generator also adds `CAP_NET_BIND_SERVICE` when a listener port is below 102
 `dns.listen`, `mixed-port`, `port`, `socks-port`, `redir-port`, `tproxy-port` or
 `external-controller` (`host:port`, including `[::]:53`). Higher ports run without it.
 
+`external-controller` serves an API that can switch mihomo to direct mode, and the kill
+switch lets everything mihomo's UID sends out, so an unauthenticated controller is a kill
+switch bypass: any local process that reaches it can route traffic around the tunnel. Set
+`secret` in `config.yaml` to a long random value (`openssl rand -hex 32`) and send it in
+the `Authorization: Bearer` header, or leave the controller off.
+
 The modules-load file loads `tun` at boot; see
 [Kernel modules and TPROXY](#kernel-modules-and-tproxy).
 
@@ -141,8 +160,30 @@ After changing a file in `/etc/nftables-killswitch.d/`, swap the rules with
 `sudo systemctl reload killswitch.service`. If the rules don't load, at boot or on a
 reload, the previous table stays in place. At boot that's a table that blocks everything
 but loopback, so the machine stays offline. `sudo journalctl -u killswitch.service` shows
-the error. To get online without the kill switch, run
-`sudo nft delete table inet killswitch`.
+the error.
+
+A reload of `nftables.service`, whose config usually begins with `flush ruleset`, or a
+manual `nft flush ruleset` deletes the table while `killswitch.service` still reports
+active. The timer checks for it and loads the rules again:
+
+```sh
+sudo install -m 644 killswitch-check.service killswitch-check.timer /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now killswitch-check.timer
+```
+
+It checks every 10 s, skips the check while `killswitch.service` is stopped, and writes
+`killswitch-check: table inet killswitch is missing, loading it again` to the journal
+(`journalctl -u killswitch-check.service`) before loading the rules again. To get online
+without the kill switch, remove its table and stop the timer that would put it back:
+
+```sh
+sudo systemctl stop killswitch-check.timer
+sudo nft delete table inet killswitch
+```
+
+`sudo systemctl stop killswitch.service` also removes the table, and the timer leaves it
+alone until the service starts again.
 
 For the IPv6 direct routing:
 
@@ -156,6 +197,10 @@ The uplinks are the interfaces that hold a default route. To fix them instead, a
 interface names to `ExecStart=` in `mihomo-v6-direct.service`. Each uplink gets a routing
 table, numbered 8999000 plus its interface index, holding that copy. The rules come at
 priorities 8998 and 8999, ahead of mihomo's at 9000.
+
+The unit keeps only `CAP_NET_ADMIN`, the capability `ip rule` and `ip route` need: `/usr`,
+`/etc`, `/sys` and `/proc/sys` are read-only, `/dev` and `/tmp` are private, only netlink and
+`AF_UNIX` (journald) sockets can be opened, and the syscall filter is `@system-service`.
 
 ## Process lookup
 
@@ -180,9 +225,10 @@ key out uses the BPF-only sandbox when `find-process-bpf-map:
 mihomo runs with no lookup privileges and its process rules don't match.
 
 An omitted `find-process-bpf-map` uses mihomo's default map path; an explicitly empty
-value disables BPF lookup. Currently the generator still permits `bpf()` in every
-mode and optionally binds the maps in fallback mode even when the map path is empty.
-Mihomo itself never needs `CAP_BPF` to read the maps.
+value disables BPF lookup. The base unit denies `bpf()`, and the generator allows it
+only in the BPF-only and `/proc` modes, where socketowner's maps are read; with lookup
+off mihomo cannot make BPF calls. In fallback mode the generator still binds the maps
+even when the map path is empty. Mihomo itself never needs `CAP_BPF` to read the maps.
 
 The service keeps a read-only `/proc` for its own memory statistics and other runtime
 uses. `ProtectProc=invisible` hides other users' processes in BPF-only and off modes.
@@ -323,7 +369,8 @@ sudo systemctl restart mihomo.service
 ### Turning it off
 
 If you don't use these rules, set `find-process-mode: off` in `config.yaml`. mihomo then
-no longer starts socketowner. Reload first so stopping the loader doesn't stop mihomo:
+no longer starts socketowner or the Wine observer. Reload first so stopping the loader
+doesn't stop mihomo:
 
 ```sh
 sudo systemctl daemon-reload
@@ -356,20 +403,23 @@ sudo semodule -i mihomo.pp
 sudo restorecon -v /usr/local/bin/socketowner-wine-observer
 sudo install -m 644 socketowner-wine-observer.service /etc/systemd/system/
 sudo systemctl daemon-reload
-sudo systemctl enable --now socketowner-wine-observer.service
+sudo systemctl restart mihomo.service
 ```
 
-Enabling adds a want to `mihomo.service`. The observer starts after the native
-loader and before mihomo, and signals readiness only after its hooks and maps are
-ready. Start it before launching games. It restarts with the native loader, whose
-detach removes all maps in their shared directory. Following a crash, it waits six
-seconds before restarting so it can replace the old heartbeat and pins.
+The observer has no `[Install]` section and needs no `systemctl enable`: when process
+lookup is on and the unit is installed, the generator makes `mihomo.service` want it.
+The observer starts after the native loader and before mihomo, and signals readiness only
+after its hooks and maps are ready. Start it before launching games. It restarts with the
+native loader; the loader's detach leaves the observer's pins alone, and the observer
+re-pins any that disappear. Following a crash, it waits six seconds before restarting so
+it can replace the old heartbeat and pins.
 
 The observer runs as root in `socketowner_wine_t`, separate from the oneshot
 loader's domain. Its capability set includes `CAP_SYS_PTRACE` and
 `CAP_DAC_READ_SEARCH` to discover pasta through other users' process fd links,
 as well as `CAP_BPF`, `CAP_PERFMON`, `CAP_NET_ADMIN` and `CAP_CHOWN`. It sees the
-host network namespace and process links. SELinux grants read-only process
+host network namespace and process links, while its filesystem view is an empty,
+read-only root with only the paths it uses bound in. SELinux grants read-only process
 inspection, not process tracing or opening other processes' memory files. Wine,
 pasta and games stay unprivileged. Published maps remain root-owned, with read
 access for the mihomo group.
@@ -385,10 +435,14 @@ Stopping the observer removes its Wine maps on a clean exit; a crash leaves stal
 records until restart. mihomo treats stale records as `wine-unknown`. The
 process remains the sandbox's pasta, so a pasta rule after the Wine rules is the
 fallback for unknown flows and those without a Wine record. Decide DNS exceptions
-before adding a blanket `wine-unknown` rejection. Disabling this optional service leaves native process lookup available:
+before adding a blanket `wine-unknown` rejection. Stopping this optional service leaves
+native process lookup available. The generator starts it again with mihomo while
+process lookup is on; remove its unit file to keep it off:
 
 ```sh
-sudo systemctl disable --now socketowner-wine-observer.service
+sudo systemctl stop socketowner-wine-observer.service
+sudo rm /etc/systemd/system/socketowner-wine-observer.service
+sudo systemctl daemon-reload
 ```
 
 ## Kernel modules and TPROXY

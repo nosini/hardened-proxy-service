@@ -1,0 +1,14 @@
+[Unit]
+Description=Periodically check the mihomo kill switch table
+
+[Timer]
+# Check shortly after boot, then every 10 s. A flush is otherwise invisible: the table
+# disappears while killswitch.service still reports active, and traffic leaks when mihomo
+# stops. AccuracySec= overrides the default one-minute coalescing window, which would
+# space the checks out far more than the interval.
+OnBootSec=10s
+OnUnitActiveSec=10s
+AccuracySec=1s
+
+[Install]
+WantedBy=timers.target
