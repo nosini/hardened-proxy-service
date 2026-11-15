@@ -35,7 +35,7 @@ fi
 
 # The networks of the uplink's global addresses, one per line
 networks() {
-  ip -6 -o addr show dev "$1" scope global | awk '{ print $4 }' | python3 -c '
+  ip -6 -o addr show dev "$1" scope global | awk '{ print $4 }' | python3 -I -c '
 import ipaddress, sys
 for net in sorted({str(ipaddress.ip_interface(a).network) for a in sys.stdin.read().split()}):
     print(net)
@@ -50,7 +50,7 @@ for net in sorted({str(ipaddress.ip_interface(a).network) for a in sys.stdin.rea
 # in place where it's the only one with its destination and metric; otherwise the new one
 # is added before the old one is removed.
 route_changes() {
-  python3 - "$1" "$2" <<'EOF'
+  python3 -I - "$1" "$2" <<'EOF'
 import subprocess, sys
 
 dev, table = sys.argv[1:]
@@ -66,10 +66,12 @@ STATUS = {"dead", "linkdown", "offload", "offload_failed", "rt_offload",
 def dump(t):
     p = subprocess.run(["ip", "-6", "-o", "route", "show", "table", t],
                        capture_output=True, text=True)
-    # ip fails on a table that has never held a route
-    if p.returncode != 0 and t != "main":
+    # ip fails on a table that has never held a route; any other error is real and must
+    # fail the run, or the table would be left empty or stale without anyone noticing
+    if p.returncode != 0:
+        if t == "main" or "FIB table does not exist" not in p.stderr:
+            p.check_returncode()
         return []
-    p.check_returncode()
     # -o puts a multipath route's nexthops on one line, separated by backslashes
     return [line.replace("\\", " ").split() for line in p.stdout.splitlines()]
 
@@ -196,25 +198,35 @@ EOF
 }
 
 # Make the rules at priority (1) match the "from NET lookup TABLE ..." lines in (2).
-# Prints "+TABLE" for each rule added and "-TABLE" for each rule removed.
+# Prints "+TABLE" for each rule added and "-TABLE" for each rule removed. Returns non-zero
+# if any of its ip commands failed: it runs in a command substitution, where errexit
+# doesn't apply, so each failure is tracked here and passed back to the caller.
 sync_rules() {
-  local pref=$1 want=$2 have rule
+  local pref=$1 want=$2 have rule rc=0
   # ip prints a /128 source without its prefix length
   have=$(ip -6 rule show | awk -v pref="$pref:" '
     $1 == pref && $2 == "from" {
-      if ($3 !~ /\//) $3 = $3 "/128"; $1 = ""; sub(/^ /, ""); print }')
+      if ($3 !~ /\//) $3 = $3 "/128"; $1 = ""; sub(/^ /, ""); print }') || return 1
   while read -r rule; do
     if [ -z "$rule" ] || grep -qxF -- "$rule" <<<"$want"; then continue; fi
     # shellcheck disable=SC2086 # the rule is split into ip's arguments
-    ip -6 rule del pref "$pref" $rule
-    echo "-$(awk '{ print $4 }' <<<"$rule")"
+    if ip -6 rule del pref "$pref" $rule; then
+      # Only report a rule that is really gone, so its table is emptied only then
+      echo "-$(awk '{ print $4 }' <<<"$rule")"
+    else
+      rc=1
+    fi
   done <<<"$have"
   while read -r rule; do
     if [ -z "$rule" ] || grep -qxF -- "$rule" <<<"$have"; then continue; fi
     # shellcheck disable=SC2086
-    ip -6 rule add pref "$pref" $rule
-    echo "+$(awk '{ print $4 }' <<<"$rule")"
+    if ip -6 rule add pref "$pref" $rule; then
+      echo "+$(awk '{ print $4 }' <<<"$rule")"
+    else
+      rc=1
+    fi
   done <<<"$want"
+  return "$rc"
 }
 
 status=0
@@ -228,11 +240,19 @@ for dev in "${ifaces[@]}"; do
   [ -n "$nets" ] || continue
   table=$((TABLE_BASE + $(<"/sys/class/net/$dev/ifindex")))
   tables+="$table"$'\n'
-  while read -r -a cmd; do
-    # A route can vanish between the dump and the change; the next run catches up
-    ip -6 route "${cmd[@]}" || status=1
-    changed=1
-  done < <(route_changes "$dev" "$table")
+  # A failed run here must be visible: in a process substitution it wouldn't be. Python
+  # fails on a route line it can't parse or an ip error, and the table then keeps its old
+  # routes, so exit non-zero and let the watcher retry.
+  if route_cmds=$(route_changes "$dev" "$table"); then
+    while read -r -a cmd; do
+      [ "${#cmd[@]}" -gt 0 ] || continue
+      # A route can vanish between the dump and the change; the next run catches up
+      ip -6 route "${cmd[@]}" || status=1
+      changed=1
+    done <<<"$route_cmds"
+  else
+    status=1
+  fi
   while read -r net; do
     nets_all+="$net"$'\n'
     uplink_rules+="from $net lookup $table"$'\n'
@@ -242,17 +262,19 @@ nets_all=$(grep . <<<"$nets_all" | sort -u || true)
 main_rules=$(awk 'NF { print "from", $1, "lookup main" }' <<<"$nets_all")
 
 rule_changes=$(
-  sync_rules "$OLD_PRIO" ""
-  sync_rules "$UPLINK_PRIO" "$uplink_rules"
-  sync_rules "$PRIO" "$main_rules"
-)
+  rc=0
+  sync_rules "$OLD_PRIO" "" || rc=1
+  sync_rules "$UPLINK_PRIO" "$uplink_rules" || rc=1
+  sync_rules "$PRIO" "$main_rules" || rc=1
+  exit "$rc"
+) || status=1
 [ -z "$rule_changes" ] || changed=1
 # Empty the tables of uplinks that are gone
 while read -r table; do
   if [ -z "$table" ] || [ "$table" = main ] || grep -qxF -- "$table" <<<"$tables"; then
     continue
   fi
-  ip -6 route flush table "$table"
+  ip -6 route flush table "$table" || status=1
 done < <(sed -n 's/^-//p' <<<"$rule_changes" | sort -u)
 
 if [ "$changed" = 1 ]; then

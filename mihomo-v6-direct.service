@@ -9,5 +9,51 @@ ExecStart=/usr/local/sbin/mihomo-v6-watch.sh
 Restart=always
 RestartSec=2
 
+# ip rule and ip route only change the kernel's routing tables, which takes CAP_NET_ADMIN.
+# The script reads /sys/class/net and parses addresses and routes with python, neither of
+# which needs another capability or a setuid binary.
+CapabilityBoundingSet=CAP_NET_ADMIN
+NoNewPrivileges=yes
+
+# Its state is the kernel's rules and routes, so the script writes no files: the system
+# directories are read-only and the home directories are hidden. /run stays writable,
+# where journald's socket, reached through /dev/log, lives.
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+# The network interfaces are only reached over netlink; a private /dev just hides the
+# device nodes, which nothing here opens.
+PrivateDevices=yes
+
+# ip talks to the kernel over netlink, and if_nametoindex uses netlink too; logger writes
+# to journald's AF_UNIX socket. Python here only parses text and opens no socket.
+RestrictAddressFamilies=AF_NETLINK AF_UNIX
+
+# An ordinary system service's syscalls, nothing else: a failure is EPERM rather than the
+# default SIGSYS, and there are no 32-bit binaries to run.
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+SystemCallArchitectures=native
+
+# The script only reads /sys/class/net; the rules live in the routing tables, not in
+# /proc/sys, so the kernel tunables can stay read-only.
+ProtectKernelTunables=yes
+# Nothing else is touched: no module is loaded, no kernel log read, and no cgroup, clock
+# or hostname change, no new namespace, no realtime or setuid/setgid bit, and the
+# personality stays native.
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+# Python's interpreter and the ipaddress module never write executable memory.
+MemoryDenyWriteExecute=yes
+# Nothing is left behind for others to read if it does write something, such as a dump.
+UMask=0077
+
 [Install]
 WantedBy=multi-user.target
