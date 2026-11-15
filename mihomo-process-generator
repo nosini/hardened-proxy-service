@@ -10,11 +10,13 @@ CONFIG = Path("/etc/mihomo/config.yaml")
 MAP = "/run/mihomo-bpf/conn_owners"
 START = "ExecStart=\nExecStart=/usr/local/bin/mihomo -d /etc/mihomo\n"
 DENY = "[Service]\nExecStart=\nExecStart=/usr/bin/false\n"
+BOOLEAN_DIR = Path("/sys/fs/selinux/booleans")
 
 
 NULL = "tag:yaml.org,2002:null"
 BOOL = "tag:yaml.org,2002:bool"
 STR = "tag:yaml.org,2002:str"
+INT = "tag:yaml.org,2002:int"
 MERGE = "tag:yaml.org,2002:merge"
 DEFAULT_MAP = "/sys/fs/bpf/mihomo/maps/conn_owners"
 BOOLEANS = {
@@ -52,8 +54,8 @@ def compose(filename):
         return next(yaml.compose_all(stream, Loader=Loader), None), yaml
 
 
-def top_level(root, yaml):
-    """Find top-level values the way yaml.v3 decodes mihomo's configuration struct.
+def fields(mapping, yaml):
+    """Find one mapping's values the way yaml.v3 decodes mihomo's configuration.
 
     Works on the composed nodes, which PyYAML's merge flattening would modify:
     each mapping's own keys must be unique, explicit keys win over merged ones,
@@ -90,34 +92,74 @@ def top_level(root, yaml):
         active.remove(id(node))
         done.add(id(node))
 
-    visit(root)
+    visit(mapping)
     return found
 
 
-def lookup_mode(filename):
+def scalar(found, name, yaml):
+    # Null leaves mihomo's default in place.
+    node = found.get(name)
+    if node is None or node.tag == NULL:
+        return None
+    if not isinstance(node, yaml.ScalarNode):
+        raise ValueError(f"{name} must be a scalar")
+    return node
+
+
+def value(found, name, yaml):
+    """A scalar value the sandbox doesn't depend on, or None if unset or not a scalar."""
+    node = found.get(name)
+    if node is None or node.tag == NULL or not isinstance(node, yaml.ScalarNode):
+        return None
+    return node
+
+
+def port(node):
+    """A port setting, decoded like yaml.v3 decodes an integer field."""
+    if node is None or node.tag != INT:
+        return None
+    try:
+        return int(node.value, 10)
+    except ValueError:
+        return None
+
+
+def listen_port(node):
+    """The port of a listen address such as 127.0.0.1:53 or [::]:53."""
+    if node is None or node.tag != STR:
+        return None
+    address = node.value.strip()
+    if address.startswith("["):
+        _, bracket, rest = address.partition("]")
+        if not bracket or not rest.startswith(":"):
+            return None
+        number = rest[1:]
+    else:
+        _, colon, number = address.rpartition(":")
+        if not colon:
+            return None
+    if not number.isdigit():
+        return None
+    return int(number)
+
+
+def settings(filename):
+    """Read the lookup sandbox and the listener settings the unit needs."""
     root, yaml = compose(filename)
     if root is None:
         raise ValueError("configuration must be a mapping")
-    found = top_level(root, yaml)
-
-    def scalar(name):
-        # Null leaves mihomo's default in place.
-        node = found.get(name)
-        if node is None or node.tag == NULL:
-            return None
-        if not isinstance(node, yaml.ScalarNode):
-            raise ValueError(f"{name} must be a scalar")
-        return node
+    found = fields(root, yaml)
 
     # find-process-mode is decoded as text, whatever the scalar resolves to.
-    node = scalar("find-process-mode")
+    node = scalar(found, "find-process-mode", yaml)
     process_mode = "strict" if node is None else node.value.lower()
     if process_mode not in ("off", "strict", "always"):
         raise ValueError("invalid find-process-mode")
 
-    node = scalar("find-process-bpf-only")
+    node = scalar(found, "find-process-bpf-only", yaml)
     if node is None:
-        only = False
+        # Mihomo permits the /proc fallback, but the default sandbox doesn't grant it.
+        only = None
     elif node.tag == BOOL and node.value in BOOLEANS:
         only = BOOLEANS[node.value]
     elif node.tag == STR and node.value in LEGACY_BOOLEANS:
@@ -125,41 +167,112 @@ def lookup_mode(filename):
     else:
         raise ValueError("find-process-bpf-only must be a boolean")
 
-    node = scalar("find-process-bpf-map")
+    node = scalar(found, "find-process-bpf-map", yaml)
     bpf_map = DEFAULT_MAP if node is None else node.value
 
+    # Only an explicit false selects the /proc fallback. An absent key uses the
+    # BPF-only sandbox, so process lookup never gets /proc access by default.
     if process_mode == "off":
-        return "off"
-    if not only:
-        return "proc"
-    if bpf_map != MAP:
+        mode = "off"
+    elif only is False:
+        mode = "proc"
+    elif bpf_map == MAP:
+        mode = "bpf"
+    elif only is None:
+        # Neither the fallback nor this service's map was asked for, as in an
+        # upstream configuration: run without lookup privileges, so lookups fail.
+        mode = "off"
+    else:
         raise ValueError("BPF-only lookup requires the service's map path")
-    return "bpf"
+
+    dns = found.get("dns")
+    dns_found = fields(dns, yaml) if isinstance(dns, yaml.MappingNode) else {}
+    listeners = [
+        port(value(found, "mixed-port", yaml)),
+        port(value(found, "port", yaml)),
+        port(value(found, "socks-port", yaml)),
+        port(value(found, "redir-port", yaml)),
+        port(value(found, "tproxy-port", yaml)),
+        listen_port(value(found, "external-controller", yaml)),
+        listen_port(value(dns_found, "listen", yaml)),
+    ]
+    # Binding a port below 1024 needs CAP_NET_BIND_SERVICE. Port 0 asks for any free
+    # port, so it doesn't.
+    bind_service = any(p is not None and 0 < p < 1024 for p in listeners)
+    tproxy = port(value(found, "tproxy-port", yaml)) or 0
+    return {"mode": mode, "bind_service": bind_service, "tproxy": tproxy}
 
 
-def dropin(mode):
+def lookup_mode(filename):
+    return settings(filename)["mode"]
+
+
+def grants(bind_service, proc=False):
+    """Capability lines for what the selected mode needs beyond the base unit."""
+    caps = "CAP_NET_ADMIN"
+    if bind_service:
+        caps += " CAP_NET_BIND_SERVICE"
+    if proc:
+        caps += " CAP_SYS_PTRACE CAP_DAC_READ_SEARCH"
+    if caps == "CAP_NET_ADMIN":
+        # The base unit already grants CAP_NET_ADMIN, ambient included.
+        return ""
+    return (
+        "CapabilityBoundingSet=\n"
+        f"CapabilityBoundingSet={caps}\n"
+        "AmbientCapabilities=\n"
+        f"AmbientCapabilities={caps}\n"
+    )
+
+
+def dropin(mode, bind_service=False, tproxy=False):
+    # TPROXY runs iptables, which the base unit's exec restriction forbids;
+    # SELinux still requires mihomo_use_iptables for it.
+    exec_paths = "NoExecPaths=\n" if tproxy else ""
+    return _dropin(mode, bind_service) + exec_paths
+
+
+def _dropin(mode, bind_service):
     if mode == "bpf":
         return (
             "[Unit]\nRequires=socketowner.service\nAfter=socketowner.service\n"
             "\n[Service]\n" + START +
-            "BindReadOnlyPaths=/sys/fs/bpf/mihomo/maps:/run/mihomo-bpf\n"
+            "BindReadOnlyPaths=/sys/fs/bpf/mihomo/maps:/run/mihomo-bpf\n" +
+            grants(bind_service)
         )
     if mode == "proc":
         return (
             # Start the loader when it's installed, but run without it if it fails.
             "[Unit]\nWants=socketowner.service\n"
             "\n[Service]\n" + START +
-            "ProtectProc=default\n"
-            "CapabilityBoundingSet=\n"
-            "CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_BIND_SERVICE CAP_SYS_PTRACE CAP_DAC_READ_SEARCH\n"
-            "AmbientCapabilities=\n"
-            "AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE CAP_SYS_PTRACE CAP_DAC_READ_SEARCH\n"
+            "ProtectProc=default\n" +
+            grants(bind_service, proc=True) +
             # Optional socket-owner acceleration, including without -exec-paths.
             "BindReadOnlyPaths=-/sys/fs/bpf/mihomo/maps:/run/mihomo-bpf\n"
         )
     if mode == "off":
-        return "[Service]\n" + START
+        return "[Service]\n" + START + grants(bind_service)
     raise ValueError("invalid lookup mode")
+
+
+def boolean_off(name):
+    """Whether SELinux is active and the boolean exists and is off."""
+    try:
+        return (BOOLEAN_DIR / name).read_text().strip() == "0"
+    except OSError:
+        return False
+
+
+def warn(configuration):
+    """Point at SELinux booleans the selected settings need."""
+    if configuration["mode"] == "proc" and boolean_off("mihomo_find_process_proc"):
+        print("mihomo-process-generator: /proc process lookup needs the SELinux "
+              "boolean mihomo_find_process_proc; run "
+              "'setsebool -P mihomo_find_process_proc on'", file=sys.stderr)
+    if configuration["tproxy"] and boolean_off("mihomo_use_iptables"):
+        print("mihomo-process-generator: TPROXY needs the SELinux boolean "
+              "mihomo_use_iptables; run "
+              "'setsebool -P mihomo_use_iptables on'", file=sys.stderr)
 
 
 def generate(output, config=CONFIG):
@@ -168,7 +281,9 @@ def generate(output, config=CONFIG):
     target = directory / "50-process-lookup.conf"
     target.write_text(DENY)
     try:
-        contents = dropin(lookup_mode(config))
+        configuration = settings(config)
+        contents = dropin(configuration["mode"], configuration["bind_service"],
+                          bool(configuration["tproxy"]))
     except Exception:
         # YAML errors can include credentials from the offending line. Log no
         # configuration contents, and do not grant access on a parsing failure.
@@ -177,6 +292,7 @@ def generate(output, config=CONFIG):
               "mihomo startup is blocked", file=sys.stderr)
         return 1
     target.write_text(contents)
+    warn(configuration)
     return 0
 
 
