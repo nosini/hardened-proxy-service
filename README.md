@@ -448,7 +448,9 @@ sudo systemctl daemon-reload
 ## Kernel modules and TPROXY
 
 mihomo uses the `tun` module and nftables expressions. The `mihomo.modules-load` file loads
-`tun` at boot, so mihomo doesn't have to ask the kernel for it. If mihomo logs a failure to
+`tun` and the nftables modules that TUN `auto-redirect` needs at boot, so mihomo doesn't have
+to ask the kernel for them. A missing nftables module shows up as `Start TUN listening error:
+auto redirect: ... netlink receive: no such file or directory`. If mihomo logs a failure to
 load a module or an AVC for `module_request`, add that module's name to
 `/etc/modules-load.d/mihomo.conf`, or enable `mihomo_load_modules` if you can't load it at
 boot:

@@ -1,3 +1,10 @@
-# Load the TUN module at boot so mihomo doesn't have to ask the kernel for it
-# (module_request, behind mihomo_load_modules). Kernels with it built in ignore this.
+# Load the modules mihomo uses at boot so it doesn't have to ask the kernel for them
+# (module_request, behind mihomo_load_modules). Kernels with them built in ignore this.
 tun
+# nftables expressions and the nat chain type for TUN auto-redirect. Without them the
+# kernel answers mihomo's table with ENOENT ("netlink receive: no such file or directory").
+nft_chain_nat
+nft_nat
+nft_redir
+nft_ct
+nft_reject_inet
