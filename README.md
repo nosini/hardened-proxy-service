@@ -51,6 +51,7 @@ sudo install -m 644 mihomo.tmpfiles /etc/tmpfiles.d/mihomo.conf
 sudo systemd-tmpfiles --create /etc/tmpfiles.d/mihomo.conf
 
 sudo install -m 644 mihomo.modules-load /etc/modules-load.d/mihomo.conf
+sudo systemctl restart systemd-modules-load.service
 ```
 
 The policy labels both `/usr/local/bin` and `/usr/bin`, since `/usr/local` isn't an
@@ -140,7 +141,8 @@ switch bypass: any local process that reaches it can route traffic around the tu
 `secret` in `config.yaml` to a long random value (`openssl rand -hex 32`) and send it in
 the `Authorization: Bearer` header, or leave the controller off.
 
-The modules-load file loads `tun` at boot; see
+The modules-load file loads `tun` and the nftables modules at boot. Restarting
+`systemd-modules-load.service` loads them now, before mihomo starts; see
 [Kernel modules and TPROXY](#kernel-modules-and-tproxy).
 
 The example uses BPF-only process lookup. Before starting mihomo, install
@@ -452,8 +454,8 @@ mihomo uses the `tun` module and nftables expressions. The `mihomo.modules-load`
 to ask the kernel for them. A missing nftables module shows up as `Start TUN listening error:
 auto redirect: ... netlink receive: no such file or directory`. If mihomo logs a failure to
 load a module or an AVC for `module_request`, add that module's name to
-`/etc/modules-load.d/mihomo.conf`, or enable `mihomo_load_modules` if you can't load it at
-boot:
+`/etc/modules-load.d/mihomo.conf` and restart `systemd-modules-load.service`, then mihomo.
+If you can't load it that way, enable `mihomo_load_modules`:
 
 ```sh
 sudo setsebool -P mihomo_load_modules on
@@ -474,7 +476,7 @@ must run; SELinux still allows exec only of `iptables` and only with the boolean
 
 Version 1.11 confines `/proc` lookup and `iptables` behind SELinux booleans, stops mihomo
 from loading kernel modules itself, grants `CAP_NET_BIND_SERVICE` from the generator instead
-of the unit, and filters forwarded traffic. On upgrade, install the modules-load file, the
+of the unit, and filters forwarded traffic. On upgrade, install and load the modules-load file, the
 policy, the unit and the generator, then reload the kill switch and restart mihomo.
 Users in `/proc` lookup mode must also enable `mihomo_find_process_proc`; TPROXY users must
 enable `mihomo_use_iptables`. A config without `find-process-bpf-only` no longer gets `/proc`
@@ -484,6 +486,7 @@ lookup.
 
 ```sh
 sudo install -m 644 mihomo.modules-load /etc/modules-load.d/mihomo.conf
+sudo systemctl restart systemd-modules-load.service
 make -f /usr/share/selinux/devel/Makefile mihomo.pp
 sudo semodule -i mihomo.pp
 sudo setsebool -P mihomo_find_process_proc on   # only for /proc lookup
