@@ -447,6 +447,38 @@ sudo rm /etc/systemd/system/socketowner-wine-observer.service
 sudo systemctl daemon-reload
 ```
 
+### Checking lookup health
+
+The mihomo build serves `GET /process-lookup` on its external controller: whether
+the socketowner maps are open and valid, with any error from opening or
+validating them; whether `find-process-bpf-only` is active; the Wine observer's
+heartbeat age and whether it counts as stale; and counters since start for BPF
+hits and misses, `/proc` fallbacks and Wine records found known or unknown.
+Wine problems are also logged once when the heartbeat goes stale or the maps
+disappear, and once when they return. See mihomo's
+[lookup health documentation](https://github.com/nosini/mihomo/blob/main/docs/socketowner.md#lookup-health)
+for the response and the exact messages.
+
+`config.example.yaml` leaves the controller off. To check locally, enable one
+in `/etc/mihomo/config.yaml`, on a port SELinux labels `unreserved_port_t` as
+the example comments note, and restart mihomo:
+
+```yaml
+external-controller: 127.0.0.1:9097
+secret: "replace-with-openssl-rand-hex-32"
+```
+
+```sh
+curl -s -H "Authorization: Bearer <secret>" http://127.0.0.1:9097/process-lookup |
+    python3 -m json.tool
+```
+
+The controller can also switch mihomo to direct mode, and the kill switch lets
+everything mihomo's UID sends out, so keep the `secret` set as the example
+comments describe. mihomo also has `external-controller-unix`, but the unit's
+SELinux policy grants mihomo no Unix listening sockets, so use the TCP listener
+here.
+
 ## Kernel modules and TPROXY
 
 mihomo uses the `tun` module and nftables expressions. The `mihomo.modules-load` file loads
