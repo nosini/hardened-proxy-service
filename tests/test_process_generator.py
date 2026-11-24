@@ -56,6 +56,7 @@ class GeneratorTests(unittest.TestCase):
         self.assertIn("Requires=socketowner.service", unit)
         self.assertIn("After=socketowner.service", unit)
         self.assertIn("BindReadOnlyPaths=/sys/fs/bpf/mihomo/maps:/run/mihomo-bpf", unit)
+        self.assertIn("BindReadOnlyPaths=-/sys/fs/cgroup\n", unit)
         self.assertIn("SystemCallFilter=bpf", unit)
         self.assertNotIn("SYS_PTRACE", unit)
         self.assertNotIn("ProtectProc=default", unit)
@@ -73,6 +74,7 @@ class GeneratorTests(unittest.TestCase):
         self.assertIn("Wants=socketowner.service", unit)
         self.assertIn("SystemCallFilter=bpf", unit)
         self.assertIn("BindReadOnlyPaths=-/sys/fs/bpf/mihomo/maps:/run/mihomo-bpf", unit)
+        self.assertIn("BindReadOnlyPaths=-/sys/fs/cgroup\n", unit)
 
     def test_absent_bpf_only_uses_bpf_sandbox(self):
         bpf = "find-process-bpf-map: /run/mihomo-bpf/conn_owners\n"

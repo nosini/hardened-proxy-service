@@ -268,7 +268,7 @@ cat /sys/kernel/security/lsm
 ```
 
 If it's missing, look processes up [through /proc](#through-proc) instead. This setup has
-been tested on Linux 7.2.
+been tested on Linux 7.3.
 
 The loader needs `CAP_BPF`, `CAP_PERFMON`, `CAP_NET_ADMIN` and `CAP_CHOWN`, and only while
 it attaches the programs; it exits afterwards and the programs stay attached.
@@ -463,6 +463,41 @@ sudo rm /etc/systemd/system/socketowner-wine-observer.service
 sudo systemctl daemon-reload
 ```
 
+### Routing by Flatpak app
+
+Flatpak apps often can't be told apart by process: JDownloader, for example, runs as
+`java` from the same bundled runtime path as other Java apps. `FLATPAK-APP` matches the
+app ID instead:
+
+```yaml
+rules:
+  - FLATPAK-APP,org.jdownloader.JDownloader,proxy
+```
+
+When a desktop session starts an app with `flatpak run`, Flatpak puts it in a systemd
+scope named after its app ID (`app-flatpak-<app ID>-<instance>.scope`). socketowner
+records the cgroup of each connection's owner, and mihomo looks the cgroup's name up in
+`/sys/fs/cgroup` and takes the app ID from the nearest Flatpak scope. App IDs are
+compared exactly, including case; `flatpak list --app` shows them. The connection list
+of the external controller shows `flatpakApp` and `cgroupPath` for such connections.
+
+This needs a socketowner build that publishes owner cgroups and a mihomo build with the
+rule. With an older loader the rule never matches, mihomo logs one warning, and other
+process rules keep working. An app started without a systemd user session, so without
+its scope, isn't recognised either.
+
+The generator binds `/sys/fs/cgroup` read-only into mihomo's sandbox whenever process
+lookup is on, and the SELinux policy lets mihomo list its directories but not open the
+files in them. Without SELinux, the files in it are readable through that bind; they
+show the process IDs and resource use of every unit and session, though not what the
+processes are.
+
+Like process names, scope names are chosen by the user's own processes: any process can
+create a scope with any name through its systemd user manager
+(`systemd-run --user --scope --unit=app-flatpak-…`) or move itself between its own
+cgroups. `FLATPAK-APP` routes cooperative apps; it is not a security boundary, and a
+`REJECT` rule based on it can be evaded by the app it names.
+
 ### Checking lookup health
 
 The mihomo build serves `GET /process-lookup` on its external controller: whether
@@ -470,6 +505,9 @@ the socketowner maps are open and valid, with any error from opening or
 validating them; whether `find-process-bpf-only` is active; the Wine observer's
 heartbeat age and whether it counts as stale; and counters since start for BPF
 hits and misses, `/proc` fallbacks and Wine records found known or unknown.
+Its `cgroups` part says whether connections can be attributed to cgroups for
+`FLATPAK-APP` rules, and why not: a loader that doesn't publish owner cgroups
+(`mapError`), or a `/sys/fs/cgroup` mihomo can't list (`rootError`).
 Wine problems are also logged once when the heartbeat goes stale or the maps
 disappear, and once when they return. See mihomo's
 [lookup health documentation](https://github.com/nosini/mihomo/blob/main/docs/socketowner.md#lookup-health)
@@ -521,6 +559,24 @@ lifts the unit's `NoExecPaths=` restriction for TPROXY, since `iptables` and its
 must run; SELinux still allows exec only of `iptables` and only with the boolean.
 
 ## Updating
+
+Version 1.13 lets mihomo list `/sys/fs/cgroup`, which the generator now binds read-only
+into its sandbox, for `FLATPAK-APP` rules. Install the updated socketowner (see
+[With socketowner](#with-socketowner)) and mihomo builds, load the policy, install the
+generator and restart both services:
+
+```sh
+sudo install -m 755 socketowner /usr/local/bin/socketowner
+sudo install -m 755 mihomo /usr/local/bin/mihomo
+sudo restorecon -v /usr/local/bin/socketowner /usr/local/bin/mihomo
+make -f /usr/share/selinux/devel/Makefile mihomo.pp
+sudo semodule -i mihomo.pp
+sudo install -D -m 755 mihomo-process-generator \
+    /etc/systemd/system-generators/mihomo-process-generator
+sudo systemctl daemon-reload
+sudo systemctl restart socketowner.service
+sudo systemctl restart mihomo.service
+```
 
 Version 1.11 confines `/proc` lookup and `iptables` behind SELinux booleans, stops mihomo
 from loading kernel modules itself, grants `CAP_NET_BIND_SERVICE` from the generator instead

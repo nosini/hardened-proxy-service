@@ -1,4 +1,4 @@
-policy_module(mihomo, 1.12)
+policy_module(mihomo, 1.13)
 
 type mihomo_t;
 type mihomo_exec_t;
@@ -112,7 +112,11 @@ dev_rw_null(mihomo_t)
 
 allow mihomo_t proc_t:dir read;
 allow mihomo_t proc_t:file { getattr open read };
-allow mihomo_t cgroup_t:dir search;
+# With process lookup, the generator binds cgroupfs read-only so mihomo can name the
+# cgroup socketowner records for a connection's owner (FLATPAK-APP rules). Naming it only
+# lists directories and reads their inode numbers; no cgroup file is opened.
+fs_list_cgroup_dirs(mihomo_t)
+allow mihomo_t cgroup_t:filesystem getattr;
 # The Go runtime reads cpu.max to size GOMAXPROCS; without a CPU quota it falls back to
 # the CPU count. If mihomo.service ever sets CPUQuota=, use fs_read_cgroup_files(mihomo_t)
 # instead, so Go reads the limit.
