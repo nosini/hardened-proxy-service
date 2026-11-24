@@ -44,8 +44,9 @@ TemporaryFileSystem=/:ro
 BindReadOnlyPaths=/usr/local/bin
 # READY=1 goes to systemd's socket, which a temporary root would hide like any other path.
 BindReadOnlyPaths=/run/systemd/notify
-# The wineserver and pasta of each sandbox, through their ns, exe and fd links.
-# ProtectProc stays at its default: hiding other processes would hide those lookups.
+# The wineserver and pasta of each sandbox, through their ns, exe and fd links,
+# and each pasta's DNS translation, through its command line. ProtectProc stays
+# at its default: hiding other processes would hide those lookups.
 BindReadOnlyPaths=/proc
 # The cgroup whose egress hook it attaches, the kernel BTF its programs are relocated
 # against, and the LSM list it checks before attaching them.
