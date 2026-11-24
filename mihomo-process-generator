@@ -8,9 +8,6 @@ import sys
 
 CONFIG = Path("/etc/mihomo/config.yaml")
 MAP = "/run/mihomo-bpf/conn_owners"
-# mihomo names the cgroup socketowner records for a connection's owner, which
-# FLATPAK-APP rules match, by listing cgroupfs. The base unit's empty root hides it.
-CGROUPS = "BindReadOnlyPaths=-/sys/fs/cgroup\n"
 START = "ExecStart=\nExecStart=/usr/local/bin/mihomo -d /etc/mihomo\n"
 # Restart=no keeps a blocked startup from restarting the failing placeholder forever.
 DENY = "[Service]\nExecStart=\nExecStart=/usr/bin/false\nRestart=no\n"
@@ -259,7 +256,6 @@ def _dropin(mode, bind_service):
             # bpf is only needed to read socketowner's maps; the base unit denies it.
             "SystemCallFilter=bpf\n" +
             "BindReadOnlyPaths=/sys/fs/bpf/mihomo/maps:/run/mihomo-bpf\n" +
-            CGROUPS +
             grants(bind_service)
         )
     if mode == "proc":
@@ -273,8 +269,7 @@ def _dropin(mode, bind_service):
             "ProtectProc=default\n" +
             grants(bind_service, proc=True) +
             # Optional socket-owner acceleration, including without -exec-paths.
-            "BindReadOnlyPaths=-/sys/fs/bpf/mihomo/maps:/run/mihomo-bpf\n" +
-            CGROUPS
+            "BindReadOnlyPaths=-/sys/fs/bpf/mihomo/maps:/run/mihomo-bpf\n"
         )
     if mode == "off":
         return "[Service]\n" + START + grants(bind_service)

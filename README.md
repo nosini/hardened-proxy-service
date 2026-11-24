@@ -476,8 +476,9 @@ rules:
 
 When a desktop session starts an app with `flatpak run`, Flatpak puts it in a systemd
 scope named after its app ID (`app-flatpak-<app ID>-<instance>.scope`). socketowner
-records the cgroup of each connection's owner, and mihomo looks the cgroup's name up in
-`/sys/fs/cgroup` and takes the app ID from the nearest Flatpak scope. App IDs are
+records the cgroup of each connection's owner and, with `-exec-paths`, the cgroup's
+path; mihomo takes the app ID from the nearest Flatpak scope in that path. A scope that
+has ended by the time the connection is looked up is still named. App IDs are
 compared exactly, including case; `flatpak list --app` shows them. The connection list
 of the external controller shows `flatpakApp` and `cgroupPath` for such connections.
 
@@ -486,11 +487,10 @@ rule. With an older loader the rule never matches, mihomo logs one warning, and 
 process rules keep working. An app started without a systemd user session, so without
 its scope, isn't recognised either.
 
-The generator binds `/sys/fs/cgroup` read-only into mihomo's sandbox whenever process
-lookup is on, and the SELinux policy lets mihomo list its directories but not open the
-files in them. Without SELinux, the files in it are readable through that bind; they
-show the process IDs and resource use of every unit and session, though not what the
-processes are.
+In BPF-only mode mihomo needs nothing more. In `/proc` mode the loader may run without
+`-exec-paths` and so record no paths; mihomo then lists `/sys/fs/cgroup` instead, which
+`ProtectControlGroups=` mounts read-only in its sandbox. The SELinux policy lets mihomo
+list its directories but not open the files in them.
 
 Like process names, scope names are chosen by the user's own processes: any process can
 create a scope with any name through its systemd user manager
@@ -506,8 +506,9 @@ validating them; whether `find-process-bpf-only` is active; the Wine observer's
 heartbeat age and whether it counts as stale; and counters since start for BPF
 hits and misses, `/proc` fallbacks and Wine records found known or unknown.
 Its `cgroups` part says whether connections can be attributed to cgroups for
-`FLATPAK-APP` rules, and why not: a loader that doesn't publish owner cgroups
-(`mapError`), or a `/sys/fs/cgroup` mihomo can't list (`rootError`).
+`FLATPAK-APP` rules, where their names come from (`source`: the loader's `bpf`
+paths or a `cgroupfs` listing), and why not: a loader that doesn't publish owner
+cgroups (`mapError`), or a `/sys/fs/cgroup` mihomo can't list (`rootError`).
 Wine problems are also logged once when the heartbeat goes stale or the maps
 disappear, and once when they return. See mihomo's
 [lookup health documentation](https://github.com/nosini/mihomo/blob/main/docs/socketowner.md#lookup-health)
@@ -560,10 +561,10 @@ must run; SELinux still allows exec only of `iptables` and only with the boolean
 
 ## Updating
 
-Version 1.13 lets mihomo list `/sys/fs/cgroup`, which the generator now binds read-only
-into its sandbox, for `FLATPAK-APP` rules. Install the updated socketowner (see
-[With socketowner](#with-socketowner)) and mihomo builds, load the policy, install the
-generator and restart both services:
+Version 1.13 adds `FLATPAK-APP` rules. BPF-only mode takes cgroup names from socketowner;
+for a loader without `-exec-paths`, the policy lets mihomo list `/sys/fs/cgroup` instead.
+Install the updated socketowner (see [With socketowner](#with-socketowner)) and mihomo
+builds, load the policy and restart both services:
 
 ```sh
 sudo install -m 755 socketowner /usr/local/bin/socketowner
@@ -571,9 +572,6 @@ sudo install -m 755 mihomo /usr/local/bin/mihomo
 sudo restorecon -v /usr/local/bin/socketowner /usr/local/bin/mihomo
 make -f /usr/share/selinux/devel/Makefile mihomo.pp
 sudo semodule -i mihomo.pp
-sudo install -D -m 755 mihomo-process-generator \
-    /etc/systemd/system-generators/mihomo-process-generator
-sudo systemctl daemon-reload
 sudo systemctl restart socketowner.service
 sudo systemctl restart mihomo.service
 ```
