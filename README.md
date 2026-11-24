@@ -691,3 +691,7 @@ Without the BPF LSM, follow [Through /proc](#through-proc) instead.
 If `restorecon` doesn't relabel `ruleset/` to `mihomo_data_t`, check
 `sudo semanage fcontext -l -C` for local rules on `/etc/mihomo` and remove them with
 `sudo semanage fcontext -d`; local rules override the module's.
+
+## License
+
+Licensed under the [GNU GPL v3](LICENSE).
