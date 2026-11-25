@@ -1,4 +1,4 @@
-policy_module(mihomo, 1.13)
+policy_module(mihomo, 1.14)
 
 type mihomo_t;
 type mihomo_exec_t;
@@ -235,10 +235,10 @@ allow socketowner_wine_t domain:file read;
 # the --dns-forward address and the --dns-host address pasta forwards onto;
 # /proc/<pid>/cmdline is the only proc file the observer opens. The domain it
 # runs in depends on how the binary was started, so each domain gets the open
-# in its own optional_policy: a packaged pasta runs in passt's pasta_t, while
-# the copy the game sandbox runs stays unconfined_t, for the reason given
-# below. Where a domain's policy module is absent the read fails, the observer
-# reports it, and that pasta's DNS flows stay unknown.
+# in its own optional_policy: a packaged pasta runs in passt's pasta_t, and the
+# copy the game sandbox runs in run-in-sandbox's sandbox_pasta_t. Where a
+# domain's policy module is absent the read fails, the observer reports it,
+# and that pasta's DNS flows stay unknown.
 optional_policy(`
     gen_require(`
         type pasta_t;
@@ -248,17 +248,17 @@ optional_policy(`
     allow socketowner_wine_t pasta_t:file { getattr open read };
 ')
 
-# A renamed pasta copy runs from a nosuid-mounted /run/user/<uid> under a
-# Landlock profile, and as a plain copy it carries that directory's label
-# instead of pasta_exec_t: no transition to pasta_t happens, and it runs in
-# the unconfined domain of the launcher that exec'd it.
+# sandbox-game runs a renamed pasta copy from /run/user/<uid>, which carries
+# that directory's label instead of pasta_exec_t. run-in-sandbox's own module
+# labels the copies sandbox_pasta_exec_t and runs them in sandbox_pasta_t;
+# without that module they run unconfined, and their command lines stay closed.
 optional_policy(`
     gen_require(`
-        type unconfined_t;
+        type sandbox_pasta_t;
     ')
-    # Like pasta_t above: the type covers every proc file of an unconfined
-    # process, and its mem keeps the process ptrace check.
-    allow socketowner_wine_t unconfined_t:file { getattr open read };
+    # Like pasta_t above: the type covers every proc file of a sandbox pasta,
+    # and its mem keeps the process ptrace check.
+    allow socketowner_wine_t sandbox_pasta_t:file { getattr open read };
 ')
 
 allow socketowner_wine_t self:udp_socket { create getopt };

@@ -510,7 +510,7 @@ host network namespace and process links, while its filesystem view is an empty,
 read-only root with only the paths it uses bound in. SELinux grants read-only
 process inspection. The only other processes' files it opens are pasta command
 lines; the policy allows that open for processes in `pasta_t` and
-`unconfined_t`. No process tracing or memory access is granted. Wine,
+`sandbox_pasta_t`. No process tracing or memory access is granted. Wine,
 pasta and games stay unprivileged. Published maps remain root-owned, with read
 access for the mihomo group.
 
@@ -520,13 +520,13 @@ joins its client or stays `wine-unknown`. The command line is the only source:
 pasta takes its default `--dns-host` from a resolv.conf that its own isolation
 hides afterwards, so a sandbox that wants its DNS joined starts pasta with
 `--dns-host`. The policy opens one proc file for two domains: package pasta
-runs in passt's `pasta_t`, while the copy the game sandbox runs from
-`/run/user/<uid>`, mounted nosuid, under a Landlock profile, carries that
-directory's label instead of `pasta_exec_t`, so no transition happens and it
-runs as `unconfined_t`. Each domain is required inside its own
-`optional_policy`, so this module also loads where either module isn't
-installed; there the read fails, the observer reports it, and that pasta's
-DNS flows stay unknown.
+runs in passt's `pasta_t`, and the copy run-in-sandbox's `sandbox-game` runs
+from `/run/user/<uid>` runs in `sandbox_pasta_t`, from run-in-sandbox's own
+SELinux module (`sudo ./install.sh --selinux` in its checkout). Without that
+module the copy runs unconfined, and its command line stays closed to the
+observer. Each domain is required inside its own `optional_policy`, so this
+module also loads where either module isn't installed; there the read fails,
+the observer reports it, and that pasta's DNS flows stay unknown.
 
 Check its state and recent discoveries with:
 
