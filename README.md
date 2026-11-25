@@ -30,7 +30,93 @@ with an nftables kill switch and an SELinux policy.
   uplinks' default routes, so replies that arrive on a secondary uplink, such as a VLAN,
   pass a strict reverse-path filter like firewalld's `IPv6_rpfilter=strict`.
 
-## Installing
+## Installing on openSUSE Tumbleweed
+
+The [home:Nosini:proxy](https://build.opensuse.org/project/show/home:Nosini:proxy)
+repository builds this service, socketowner and the
+[mihomo build](https://github.com/nosini/mihomo) it expects from their `main` branches.
+Its `mihomo` replaces openSUSE's, so the repository needs a higher priority than the
+distribution's:
+
+```sh
+sudo zypper ar -p 90 -f https://download.opensuse.org/repositories/home:/Nosini:/proxy/openSUSE_Tumbleweed/ nosini-proxy
+sudo zypper ref nosini-proxy
+sudo zypper in hardened-proxy-service
+```
+
+`hardened-proxy-service` pulls in `mihomo`, the SELinux policy
+(`hardened-proxy-service-selinux`) on systems with the targeted policy, and socketowner
+as a recommended package. Two parts are optional packages:
+
+- `hardened-proxy-service-wine-observer`: the
+  [Wine observer](#wine-process-attribution) and its unit.
+- `hardened-proxy-service-v6-direct`: the IPv6 direct routing, as
+  `mihomo-v6-direct.service`.
+
+The packages create the `mihomo` user, load the policy, create `/etc/mihomo` and install
+the kill switch, the units, the generator and the modules-load file. Executables are in
+`/usr/bin`, the units in `/usr/lib/systemd/system` and the IPv6 scripts in
+`/usr/libexec/hardened-proxy-service`; the sections below show the paths of an
+installation by hand, under `/usr/local` and `/etc/systemd/system`. No service is enabled
+on installation. What remains is the configuration: write `/etc/mihomo/config.yaml` from
+the example, fetch `geoip.metadb` if GEOIP rules are used, and list the LAN's addresses for
+the kill switch, all as described in [Installing by hand](#installing-by-hand):
+
+```sh
+sudo install -m 640 -o root -g mihomo \
+    /usr/share/doc/packages/hardened-proxy-service/config.example.yaml /etc/mihomo/config.yaml
+```
+
+Then enable the services. The kill switch blocks all traffic outside the tunnel as soon
+as it loads, so check the configuration first on a remote machine:
+
+```sh
+sudo systemctl enable --now killswitch.service mihomo.service killswitch-check.timer
+```
+
+`sudo zypper up` installs new builds. An update restarts mihomo and reloads the kill
+switch's rules in place, so the kill switch stays loaded throughout. A loader update takes
+effect at `sudo systemctl restart socketowner.service`.
+
+### Switching from an installation by hand
+
+The files of an installation by hand take precedence over the packages': units and the
+generator in `/etc/systemd`, and a policy module loaded with `semodule -i`, at priority 400
+above the package's 200. Installing the packages also removes the enable links of units it
+replaces, as openSUSE's presets leave new services disabled; the services keep running, but
+wouldn't start at the next boot. After installing the packages, back up and remove the
+files installed by hand, then enable the services again:
+
+```sh
+sudo tar czf /root/proxy-manual-backup.tar.gz --ignore-failed-read \
+    /usr/local/bin/{mihomo,socketowner,socketowner-wine-observer} \
+    /usr/local/sbin/mihomo-v6-{direct,watch}.sh \
+    /etc/systemd/system/{mihomo,killswitch,killswitch-check,socketowner,socketowner-wine-observer,mihomo-v6-direct}.service \
+    /etc/systemd/system/killswitch-check.timer \
+    /etc/systemd/system-generators/mihomo-process-generator \
+    /etc/{sysusers.d,tmpfiles.d,modules-load.d}/mihomo.conf
+sudo rm -f /usr/local/bin/{mihomo,socketowner,socketowner-wine-observer} \
+    /usr/local/sbin/mihomo-v6-{direct,watch}.sh \
+    /etc/systemd/system/{mihomo,killswitch,killswitch-check,socketowner,socketowner-wine-observer,mihomo-v6-direct}.service \
+    /etc/systemd/system/killswitch-check.timer \
+    /etc/systemd/system-generators/mihomo-process-generator \
+    /etc/{sysusers.d,tmpfiles.d,modules-load.d}/mihomo.conf
+sudo semodule -X 400 -r mihomo
+sudo restorecon -Rv /etc/mihomo
+sudo systemctl daemon-reload
+sudo systemctl reenable killswitch.service mihomo.service killswitch-check.timer
+sudo systemctl reload killswitch.service
+sudo systemctl try-restart socketowner.service socketowner-wine-observer.service
+sudo systemctl restart mihomo.service
+```
+
+Add `mihomo-v6-direct.service` to the `reenable` line if it was enabled. A kill switch
+config that differed from the package's is kept as `/etc/nftables-killswitch.conf.rpmorig`;
+compare the two before the reload. `systemctl cat mihomo.service` then shows
+`ExecStart=/usr/bin/mihomo -d /etc/mihomo` in the generated drop-in, and `ps -eZ | grep
+mihomo_t` the running service.
+
+## Installing by hand
 
 Install the mihomo binary as `/usr/local/bin/mihomo`.
 Install Python 3 and PyYAML from your distribution. The process-lookup generator uses
@@ -560,6 +646,10 @@ lifts the unit's `NoExecPaths=` restriction for TPROXY, since `iptables` and its
 must run; SELinux still allows exec only of `iptables` and only with the boolean.
 
 ## Updating
+
+With the packages, `sudo zypper up` installs the new files, policy and units; settings in
+`config.yaml` and SELinux booleans that a version note asks for still have to be changed
+by hand. The commands below are for installations by hand.
 
 Version 1.13 adds `FLATPAK-APP` rules. BPF-only mode takes cgroup names from socketowner;
 for a loader without `-exec-paths`, the policy lets mihomo list `/sys/fs/cgroup` instead.
