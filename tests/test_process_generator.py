@@ -172,6 +172,14 @@ class GeneratorTests(unittest.TestCase):
             ("mixed-port: 443\n", True),
             ("mixed-port: 7891\n", False),
             ("port: 80\n", True),
+            ("port: 0x50\n", True),
+            ("port: 0o120\n", True),
+            ("port: 0O120\n", True),
+            ("port: 053\n", True),
+            ("port: 0\n", False),
+            ("port: 1_000\n", True),
+            ("port: 1_023\n", True),
+            ("port: 1_024\n", False),
             ("socks-port: 1080\n", False),
             ("redir-port: 53\n", True),
             ("tproxy-port: 53\n", True),
@@ -179,10 +187,38 @@ class GeneratorTests(unittest.TestCase):
             ("external-controller: '[::]:53'\n", True),
             ("external-controller: '127.0.0.1:9090'\n", False),
             ("external-controller: '[::1]:53'\n", True),
-            ("dns:\n  listen: 127.1.1.1:53\n", True),
-            ("dns:\n  listen: '[::]:53'\n", True),
-            ("dns:\n  listen: 127.1.1.1:1053\n", False),
+            ("external-controller-tls: 127.0.0.1:53\n", True),
+            ("external-controller-tls: '127.0.0.1:9090'\n", False),
+            ("dns:\n  enable: true\n  listen: 127.1.1.1:53\n", True),
+            ("dns:\n  enable: true\n  listen: '[::]:53'\n", True),
+            ("dns:\n  enable: true\n  listen: 127.1.1.1:1053\n", False),
+            ("dns:\n  listen: 127.1.1.1:53\n", False),
+            ("dns:\n  enable: false\n  listen: 127.1.1.1:53\n", False),
             ("dns:\n  enable: true\n", False),
+            ("tuic-server:\n  enable: true\n  listen: 0.0.0.0:53\n", True),
+            ("tuic-server:\n  enable: true\n  listen: 0.0.0.0:1053\n", False),
+            ("tuic-server:\n  enable: false\n  listen: 0.0.0.0:53\n", False),
+            ("tuic-server:\n  listen: 0.0.0.0:53\n", False),
+            ("listeners:\n  - name: a\n    port: 80\n", True),
+            ("listeners:\n  - name: a\n    port: 8080\n", False),
+            ("listeners:\n  - name: a\n    port: 0x50\n", True),
+            ("listeners:\n  - name: a\n    port: 0o120\n", True),
+            ("listeners:\n  - name: a\n    port: 1_000\n", True),
+            ("listeners:\n  - name: a\n    port: 1_024\n", False),
+            ("listeners:\n  - name: a\n    port: '80'\n", True),
+            ("listeners:\n  - name: a\n    port: '0'\n", False),
+            ("listeners:\n  - name: a\n    port: '800-810'\n", True),
+            ("listeners:\n  - name: a\n    port: '800-1080'\n", True),
+            ("listeners:\n  - name: a\n    port: '1023-1024'\n", True),
+            ("listeners:\n  - name: a\n    port: '1800-2000'\n", False),
+            ("listeners:\n  - name: a\n    port: '800-700'\n", False),
+            ("listeners:\n  - name: a\n    port: '80,443'\n", True),
+            ("listeners:\n  - name: a\n    port: '8000,443'\n", True),
+            ("listeners:\n  - name: a\n    port: '8000/443'\n", True),
+            ("listeners:\n  - name: a\n    port: '8000,9000'\n", False),
+            ("listeners:\n  - name: a\n    port: 'bad'\n", False),
+            ("listeners:\n  - plain\n  - port: 80\n", True),
+            ("listeners:\n  - name: a\n    port: 80\n    port: 90\n", False),
         ):
             with self.subTest(config=config):
                 status, unit, errors = self.generate("find-process-mode: off\n" + config)
@@ -191,12 +227,33 @@ class GeneratorTests(unittest.TestCase):
 
     def test_low_port_adds_bind_service_to_proc_capabilities(self):
         status, unit, errors = self.generate(
-            "find-process-bpf-only: false\ndns:\n  listen: 127.1.1.1:53\n")
+            "find-process-bpf-only: false\n"
+            "dns:\n  enable: true\n  listen: 127.1.1.1:53\n")
         self.assertEqual(status, 0, errors)
         self.assertIn("CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_BIND_SERVICE "
                       "CAP_SYS_PTRACE CAP_DAC_READ_SEARCH", unit)
         self.assertIn("AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE "
                       "CAP_SYS_PTRACE CAP_DAC_READ_SEARCH", unit)
+
+    def test_bpf_mode_warns_when_bpf_only_is_omitted(self):
+        bpf = "find-process-bpf-map: /run/mihomo-bpf/conn_owners\n"
+        for config in ("find-process-mode: always\n" + bpf,
+                       "find-process-mode: always\nfind-process-bpf-only: null\n" + bpf):
+            with self.subTest(config=config):
+                status, unit, errors = self.generate(config)
+                self.assertEqual(status, 0, errors)
+                self.assertIn("find-process-bpf-only", errors)
+                self.assertIn("bpfOnly: false", errors)
+                self.assertIn("find-process-bpf-only: true", errors)
+        status, unit, errors = self.generate(
+            "find-process-bpf-only: true\n" + bpf)
+        self.assertEqual(status, 0, errors)
+        self.assertNotIn("find-process-bpf-only", errors)
+        for config in ("find-process-mode: always\n", "find-process-mode: off\n"):
+            with self.subTest(config=config):
+                status, unit, errors = self.generate(config)
+                self.assertEqual(status, 0, errors)
+                self.assertNotIn("find-process-bpf-only", errors)
 
     def test_boolean_off_reads_the_active_field(self):
         for contents, off in (("0 0", True), ("0 1", True),

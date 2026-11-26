@@ -120,9 +120,9 @@ dev_rw_null(mihomo_t)
 allow mihomo_t proc_t:dir read;
 allow mihomo_t proc_t:file { getattr open read };
 # When the loader runs without -exec-paths and so records no cgroup paths, mihomo names
-# the cgroup socketowner records for a connection's owner (FLATPAK-APP rules) by listing
-# cgroupfs, which ProtectControlGroups= mounts read-only in its sandbox. Naming it only
-# lists directories and reads their inode numbers; no cgroup file is opened.
+# the cgroup socketowner records for a connection's owner (FLATPAK-APP and SYSTEMD-UNIT
+# rules) by listing cgroupfs, which ProtectControlGroups= mounts read-only in its sandbox.
+# Naming it only lists directories and reads their inode numbers; no cgroup file is opened.
 fs_list_cgroup_dirs(mihomo_t)
 allow mihomo_t cgroup_t:filesystem getattr;
 # The Go runtime reads cpu.max to size GOMAXPROCS; without a CPU quota it falls back to

@@ -1,7 +1,9 @@
 [Unit]
 Description=Record the process behind each connection for mihomo
-# mihomo binds the maps directory into its sandbox when it starts, so attach first. The
-# directory stays when this stops or restarts, and mihomo picks up the new maps.
+# mihomo binds the maps directory into its sandbox when it starts, so attach first. In
+# BPF-only mode mihomo.service has Requires=socketowner.service, so restarting this unit
+# restarts mihomo.service too; in /proc mode mihomo picks up the new maps without
+# restarting. The directory stays when this stops or restarts.
 Before=mihomo.service
 
 [Service]

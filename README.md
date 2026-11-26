@@ -17,9 +17,9 @@ with an nftables kill switch and an SELinux policy.
   mihomo stops, nothing leaks. If the rules fail to load, everything but loopback stays
   blocked. `killswitch-check.timer` loads them again if something flushes the table.
 - `socketowner.service` attaches small BPF programs that record which process opened
-  each connection and which program each process runs, for `PROCESS-NAME` and
-  `PROCESS-PATH` rules. It needs the kernel's BPF LSM; see
-  [Process lookup](#process-lookup).
+  each connection, the program each process runs, and the owner's cgroup, for
+  `PROCESS-NAME`, `PROCESS-PATH`, `FLATPAK-APP` and `SYSTEMD-UNIT` rules. It needs the
+  kernel's BPF LSM; see [Process lookup](#process-lookup).
 - `mihomo.te`, `mihomo.fc` and `mihomo.if` confine mihomo to `mihomo_t`, and
   socketowner to `socketowner_t`. The optional Wine observer has its own
   `socketowner_wine_t` domain.
@@ -217,9 +217,14 @@ The generator goes in `/etc`, not `/usr/local`: systemd runs generators at boot 
 mounts file systems other than `/` and `/usr`, and `/usr/local` is often one of them (a
 btrfs subvolume on openSUSE). Without the generator, mihomo doesn't start.
 
-The generator also adds `CAP_NET_BIND_SERVICE` when a listener port is below 1024:
-`dns.listen`, `mixed-port`, `port`, `socks-port`, `redir-port`, `tproxy-port` or
-`external-controller` (`host:port`, including `[::]:53`). Higher ports run without it.
+The generator also adds `CAP_NET_BIND_SERVICE` when a checked listener port is below
+1024: `dns.listen` when `dns.enable` is true, `mixed-port`, `port`, `socks-port`,
+`redir-port`, `tproxy-port`, `external-controller`, `external-controller-tls` (both
+`host:port`, including `[::]:53`), `tuic-server.listen` when `tuic-server.enable` is
+true, and `listeners[].port` (single ports, comma lists and ranges). Higher ports run
+without it. `mihomo.te` allows `name_bind` only on `dns_port_t` and `unreserved_port_t`,
+so other ports below 1024, such as 80 or 443, still need an SELinux policy allowance
+even with `CAP_NET_BIND_SERVICE`.
 
 `external-controller` serves an API that can switch mihomo to direct mode, and the kill
 switch lets everything mihomo's UID sends out, so an unauthenticated controller is a kill
@@ -293,7 +298,8 @@ The unit keeps only `CAP_NET_ADMIN`, the capability `ip rule` and `ip route` nee
 ## Process lookup
 
 `find-process-mode: always` lets rules match the process behind a connection
-(`PROCESS-NAME`, `PROCESS-PATH`). `mihomo-process-generator` reads the lookup settings
+(`PROCESS-NAME`, `PROCESS-PATH`) and its cgroup (`FLATPAK-APP`, `SYSTEMD-UNIT`).
+`mihomo-process-generator` reads the lookup settings
 from `/etc/mihomo/config.yaml` at boot and on `systemctl daemon-reload`, and generates a
 drop-in for `mihomo.service`:
 
@@ -441,22 +447,30 @@ The generator adds the two capabilities and makes the process entries visible. I
 booleans: while `mihomo_find_process_proc` is off it logs a warning at boot with the
 `setsebool` command, and `/proc` lookup then fails with AVC denials.
 
-The generator starts socketowner in this mode too. Without the BPF LSM it can still
-record which process owns each connection, though not what each process runs. That keeps
-short UDP exchanges matching their rules while the process runs; mihomo then reads the
-path from `/proc`. Without it, though, a connected socket that one process hands
-to another is still credited to the first. Install it as above and run it without
-`-exec-paths`:
+In `/proc` mode the generator starts `socketowner.service`, and the Wine observer when
+installed, only when `find-process-bpf-map: /run/mihomo-bpf/conn_owners` is set. Without
+the BPF LSM socketowner can still record which process owns each connection, though not
+what each process runs. That keeps short UDP exchanges matching their rules while the
+process runs; mihomo then reads the path from `/proc`. Without it, though, a connected
+socket that one process hands to another is still credited to the first. Install it as
+above and run it without `-exec-paths`:
 
 ```sh
 sudo mkdir -p /etc/systemd/system/socketowner.service.d
 printf '%s\n' '[Service]' 'ExecStart=' \
-    'ExecStart=/usr/local/bin/socketowner -reader-group mihomo attach' |
+    'ExecStart=/usr/local/bin/socketowner -reader-group mihomo attach' \
+    'CapabilityBoundingSet=' \
+    'CapabilityBoundingSet=CAP_BPF CAP_NET_ADMIN CAP_CHOWN' |
     sudo tee /etc/systemd/system/socketowner.service.d/no-exec-paths.conf
 sudo systemctl daemon-reload
 sudo systemctl restart socketowner.service
 sudo systemctl restart mihomo.service
 ```
+
+If `socketowner.service` fails at boot before it creates `/sys/fs/bpf/mihomo/maps`,
+`mihomo.service` starts without `/run/mihomo-bpf` mounted. Starting `socketowner.service`
+later then requires restarting `mihomo.service` too, so the bind mount appears in its
+sandbox.
 
 ### Turning it off
 
@@ -473,9 +487,10 @@ sudo systemctl restart mihomo.service
 ### Wine process attribution
 
 The optional `socketowner-wine-observer.service` runs continuously and discovers
-wineservers and their sandbox pastas. It lets a compatible mihomo build match
-Windows executable names with `WINE-PROCESS-NAME`. Native process lookup continues
-through `socketowner.service`. The observer and reader are available on the
+wineservers and their sandbox pastas. It lets a compatible mihomo build match Windows
+executables by name or path with `WINE-PROCESS-NAME`, `WINE-PROCESS-PATH`, and their
+`-REGEX` and `-WILDCARD` variants. Native process lookup continues through
+`socketowner.service`. The observer and reader are available on the
 `main` branches of socketowner and mihomo. See socketowner's
 [Wine attribution documentation](https://github.com/nosini/socketowner/tree/main/wine)
 for capture limits, unknown flows and DNS handling.
@@ -528,9 +543,12 @@ runs in passt's `pasta_t`, and the copy run-in-sandbox's `sandbox-game` runs
 from `/run/user/<uid>` runs in `sandbox_pasta_t`, from run-in-sandbox's own
 SELinux module (`sudo ./install.sh --selinux` in its checkout). Without that
 module the copy runs unconfined, and its command line stays closed to the
-observer. Each domain is required inside its own `optional_policy`, so this
-module also loads where either module isn't installed; there the read fails,
-the observer reports it, and that pasta's DNS flows stay unknown.
+observer. Pasta running in `container_runtime_t`, for example under Podman or Quadlet,
+is likewise outside both domains: `socketowner_wine_t` can't open its command line, so
+its DNS flows stay `wine-unknown` while `/process-lookup` still reports healthy. Each
+domain is required inside its own `optional_policy`, so this module also loads where
+either module isn't installed; there the read fails, the observer reports it, and that
+pasta's DNS flows stay unknown.
 
 Check its state and recent discoveries with:
 
@@ -588,6 +606,30 @@ create a scope with any name through its systemd user manager
 cgroups. `FLATPAK-APP` routes cooperative apps; it is not a security boundary, and a
 `REJECT` rule based on it can be evaded by the app it names.
 
+### Routing by systemd unit
+
+`SYSTEMD-UNIT` matches the systemd service or scope whose cgroup holds the connection's
+owner:
+
+```yaml
+rules:
+  - SYSTEMD-UNIT,jdownloader.service,proxy
+  - SYSTEMD-UNIT,backup.service,direct
+```
+
+The unit is the nearest service or scope in the owner's cgroup path; slices are skipped,
+and cgroups below a unit belong to it. Unit names are compared exactly, including case
+and systemd escapes such as `\x2d`. The connection list of the external controller shows
+`systemdUnit` for such connections.
+
+This uses the same socketowner cgroup records as `FLATPAK-APP`, so it needs a loader that
+publishes owner cgroups and a mihomo build with the rule. In BPF-only mode mihomo needs
+nothing more; in `/proc` mode it may list `/sys/fs/cgroup` as described above. Like
+`FLATPAK-APP`, `SYSTEMD-UNIT` routes cooperative units, not a security boundary: any
+process can start a scope with any name through its systemd user manager or move itself
+between its own cgroups, and a `REJECT` rule based on it can be evaded by the process it
+names.
+
 ### Checking lookup health
 
 The mihomo build serves `GET /process-lookup` on its external controller: whether
@@ -595,10 +637,11 @@ the socketowner maps are open and valid, with any error from opening or
 validating them; whether `find-process-bpf-only` is active; the Wine observer's
 heartbeat age and whether it counts as stale; and counters since start for BPF
 hits and misses, `/proc` fallbacks and Wine records found known or unknown.
-Its `cgroups` part says whether connections can be attributed to cgroups for
-`FLATPAK-APP` rules, where their names come from (`source`: the loader's `bpf`
-paths or a `cgroupfs` listing), and why not: a loader that doesn't publish owner
-cgroups (`mapError`), or a `/sys/fs/cgroup` mihomo can't list (`rootError`).
+Its `cgroups` part includes `available`, which says whether connections can be
+attributed to cgroups for `FLATPAK-APP` and `SYSTEMD-UNIT` rules, where their names
+come from (`source`: the loader's `bpf` paths or a `cgroupfs` listing), and why not: a
+loader that doesn't publish owner cgroups (`mapError`), or a `/sys/fs/cgroup` mihomo
+can't list (`rootError`).
 Wine problems are also logged once when the heartbeat goes stale or the maps
 disappear, and once when they return. See mihomo's
 [lookup health documentation](https://github.com/nosini/mihomo/blob/main/docs/socketowner.md#lookup-health)
@@ -658,8 +701,9 @@ With the packages, `sudo zypper up` installs the new files, policy and units; se
 `config.yaml` and SELinux booleans that a version note asks for still have to be changed
 by hand. The commands below are for installations by hand.
 
-Version 1.13 adds `FLATPAK-APP` rules. BPF-only mode takes cgroup names from socketowner;
-for a loader without `-exec-paths`, the policy lets mihomo list `/sys/fs/cgroup` instead.
+Version 1.13 adds `FLATPAK-APP` rules, and `SYSTEMD-UNIT` rules use the same cgroup
+records. BPF-only mode takes cgroup names from socketowner; for a loader without
+`-exec-paths`, the policy lets mihomo list `/sys/fs/cgroup` instead.
 Install the updated socketowner (see [With socketowner](#with-socketowner)) and mihomo
 builds, load the policy and restart both services:
 

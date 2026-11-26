@@ -62,6 +62,9 @@ def compose(filename):
     }
     Loader.add_implicit_resolver(
         BOOL, re.compile(r"^(?:true|True|TRUE|false|False|FALSE)$"), list("tTfF"))
+    # PyYAML predates YAML 1.2's 0o octal, which yaml.v3 also decodes as an integer.
+    Loader.add_implicit_resolver(
+        INT, re.compile(r"^[-+]?0[oO][0-7_]+$"), list("-+0"))
     # Like yaml.v3, use the first document.
     with filename.open() as stream:
         return next(yaml.compose_all(stream, Loader=Loader), None), yaml
@@ -131,10 +134,29 @@ def port(node):
     """A port setting, decoded like yaml.v3 decodes an integer field."""
     if node is None or node.tag != INT:
         return None
+    text = node.value.replace("_", "")
+    sign = 1
+    if text[:1] in ("+", "-"):
+        if text[0] == "-":
+            sign = -1
+        text = text[1:]
+    if not text:
+        return None
     try:
-        return int(node.value, 10)
+        if text[:2] in ("0x", "0X"):
+            number = int(text[2:], 16)
+        elif text[:2] in ("0o", "0O"):
+            number = int(text[2:], 8)
+        elif text[:2] in ("0b", "0B"):
+            number = int(text[2:], 2)
+        elif len(text) > 1 and text[0] == "0":
+            # yaml.v3 keeps YAML 1.1's leading-zero octal, but not for "0" itself.
+            number = int(text[1:], 8)
+        else:
+            number = int(text, 10)
     except ValueError:
         return None
+    return sign * number
 
 
 def boolean(found, name, yaml):
@@ -164,6 +186,41 @@ def listen_port(node):
     if not number.isdigit():
         return None
     return int(number)
+
+
+def listener_port(node, yaml):
+    """Whether a listeners entry binds a port below 1024."""
+    if not isinstance(node, yaml.MappingNode):
+        return False
+    try:
+        found = fields(node, yaml)
+    except ValueError:
+        # A malformed entry doesn't affect the other listeners.
+        return False
+    node = value(found, "port", yaml)
+    if node is None:
+        return False
+    if node.tag == INT:
+        p = port(node)
+        return p is not None and 0 < p < 1024
+    if node.tag != STR:
+        return False
+    # mihomo accepts comma- or slash-separated single ports and inclusive ranges.
+    for item in re.split(r"[,/]", node.value):
+        bounds = item.strip(" []").split("-")
+        if len(bounds) == 1:
+            bounds *= 2
+        elif len(bounds) != 2:
+            continue
+        bounds = [bound.strip(" []") for bound in bounds]
+        if not all(re.fullmatch(r"[0-9]+", bound) for bound in bounds):
+            continue
+        lo, hi = (int(bound, 10) for bound in bounds)
+        if lo > hi or lo > 65535 or hi > 65535:
+            continue
+        if lo < 1024 and hi > 0:
+            return True
+    return False
 
 
 def settings(filename):
@@ -213,6 +270,8 @@ def settings(filename):
 
     dns = found.get("dns")
     dns_found = fields(dns, yaml) if isinstance(dns, yaml.MappingNode) else {}
+    tuic = found.get("tuic-server")
+    tuic_found = fields(tuic, yaml) if isinstance(tuic, yaml.MappingNode) else {}
     listeners = [
         port(value(found, "mixed-port", yaml)),
         port(value(found, "port", yaml)),
@@ -220,11 +279,20 @@ def settings(filename):
         port(value(found, "redir-port", yaml)),
         port(value(found, "tproxy-port", yaml)),
         listen_port(value(found, "external-controller", yaml)),
-        listen_port(value(dns_found, "listen", yaml)),
+        listen_port(value(found, "external-controller-tls", yaml)),
+        listen_port(value(dns_found, "listen", yaml))
+        if boolean(dns_found, "enable", yaml) else None,
+        listen_port(value(tuic_found, "listen", yaml))
+        if isinstance(tuic, yaml.MappingNode)
+        and boolean(tuic_found, "enable", yaml) else None,
     ]
     # Binding a port below 1024 needs CAP_NET_BIND_SERVICE. Port 0 asks for any free
     # port, so it doesn't.
     bind_service = any(p is not None and 0 < p < 1024 for p in listeners)
+    entries = found.get("listeners")
+    if isinstance(entries, yaml.SequenceNode):
+        bind_service = bind_service or any(
+            listener_port(item, yaml) for item in entries.value)
     tproxy = port(value(found, "tproxy-port", yaml)) or 0
     iptables = found.get("iptables")
     iptables_found = fields(iptables, yaml) if isinstance(iptables, yaml.MappingNode) else {}
@@ -237,7 +305,7 @@ def settings(filename):
         and not boolean(tun_found, "enable", yaml)
     )
     return {"mode": mode, "bind_service": bind_service, "tproxy": tproxy,
-            "iptables": use_iptables, "bpf_map": bpf_map}
+            "iptables": use_iptables, "bpf_map": bpf_map, "bpf_only": only}
 
 
 def lookup_mode(filename):
@@ -344,6 +412,12 @@ def boolean_off(name):
 
 def warn(configuration):
     """Point at SELinux booleans the selected settings need."""
+    if configuration["mode"] == "bpf" and configuration["bpf_only"] is None:
+        print("mihomo-process-generator: 'find-process-bpf-only' is omitted, so "
+              "mihomo tries /proc when BPF lookup misses inside the BPF-only "
+              "sandbox; those reads are denied and lookups report "
+              "'bpfOnly: false'. Set 'find-process-bpf-only: true' to keep "
+              "lookup inside BPF", file=sys.stderr)
     if configuration["mode"] == "proc" and configuration["bpf_map"] not in ("", MAP):
         print("mihomo-process-generator: /proc process lookup exposes socketowner's "
               f"maps only at {MAP}, so BPF lookup, FLATPAK-APP, SYSTEMD-UNIT and "
