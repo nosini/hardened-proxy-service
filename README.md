@@ -307,7 +307,7 @@ drop-in for `mihomo.service`:
 | --- | --- |
 | `find-process-mode: off` | Other users' processes hidden; no BPF maps or inspection capabilities |
 | `find-process-bpf-only: true` with matching enabled | Other users' processes hidden; requires socketowner and its maps |
-| `find-process-bpf-only` absent with matching enabled | With `find-process-bpf-map: /run/mihomo-bpf/conn_owners`, the BPF-only sandbox; otherwise as `off`, so lookups fail. `/proc` is never granted |
+| `find-process-bpf-only` absent with matching enabled | With `find-process-bpf-map: /run/mihomo-bpf/conn_owners`, the BPF-only sandbox (with a warning to set `find-process-bpf-only: true`); otherwise as `off`, so lookups fail. `/proc` is never granted |
 | `find-process-bpf-only: false` with matching enabled | Processes visible; adds `CAP_SYS_PTRACE` and `CAP_DAC_READ_SEARCH`; with `find-process-bpf-map: /run/mihomo-bpf/conn_owners`, also starts socketowner and binds its maps |
 
 Matching is enabled with `always` or `strict` (mihomo's default). Only an explicit
@@ -315,7 +315,9 @@ Matching is enabled with `always` or `strict` (mihomo's default). Only an explic
 the owner and executable path if recorded, otherwise the BPF owner's `/proc/<pid>/exe`. If
 that fails or BPF has no owner, it falls back to netlink and a `/proc` search. Leaving the
 key out uses the BPF-only sandbox when `find-process-bpf-map:
-/run/mihomo-bpf/conn_owners` is set. Without that map path, as in an upstream config,
+/run/mihomo-bpf/conn_owners` is set, and logs a warning because mihomo itself
+defaults to allowing `/proc` fallback, which hits denials inside that sandbox.
+Without that map path, as in an upstream config,
 mihomo runs with no lookup privileges and its process rules don't match.
 
 An omitted `find-process-bpf-map` uses mihomo's default map path; an explicitly empty
@@ -418,8 +420,10 @@ shows "Using socket owners and executables recorded in /run/mihomo-bpf".
 
 Some processes can't be named:
 
-- Connections opened before socketowner started. Processes that were already running
-  are filled in when it starts, but their earlier connections aren't.
+- Connections opened before socketowner started that have not sent since it
+  attached. Processes that were already running are filled in when it starts,
+  and with `-exec-paths` a socket is attributed to its sender on the first send
+  after attach; without `-exec-paths`, earlier connections remain unnamed.
 - Programs whose path is longer than 1024 bytes.
 - A process in a plain `chroot` is named by its path inside the chroot. Containers and
   sandboxes such as Flatpak show their in-sandbox path, as they do in `/proc`.

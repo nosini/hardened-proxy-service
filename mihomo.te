@@ -34,8 +34,8 @@ gen_tunable(mihomo_load_modules, false)
 
 ## <desc>
 ## <p>
-## Allow mihomo to run iptables to set up its TPROXY redirect rules. Only needed with a
-## nonzero tproxy-port.
+## Allow mihomo to run iptables and ip to set up its TPROXY redirect rules. Only needed with a
+## nonzero tproxy-port, iptables.enable: true, and TUN off.
 ## </p>
 ## </desc>
 gen_tunable(mihomo_use_iptables, false)
