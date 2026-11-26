@@ -10,5 +10,6 @@
 /etc/mihomo/ruleset(/.*)?     gen_context(system_u:object_r:mihomo_data_t,s0)
 /etc/mihomo/cache\.db    --   gen_context(system_u:object_r:mihomo_data_t,s0)
 /etc/mihomo/geoip\.metadb --  gen_context(system_u:object_r:mihomo_data_t,s0)
+/run/mihomo(/.*)?             gen_context(system_u:object_r:mihomo_runtime_t,s0)
 /usr/bin/socketowner-wine-observer       -- gen_context(system_u:object_r:socketowner_wine_exec_t,s0)
 /usr/local/bin/socketowner-wine-observer -- gen_context(system_u:object_r:socketowner_wine_exec_t,s0)

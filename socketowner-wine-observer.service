@@ -80,5 +80,8 @@ LockPersonality=yes
 MemoryDenyWriteExecute=yes
 UMask=0077
 
-# No [Install] section: mihomo-process-generator starts the observer with mihomo whenever
-# process lookup is on, since it only matters to readers that are looking processes up.
+# No [Install] section: mihomo-process-generator makes mihomo want this unit
+# only where it also starts socketowner.service (BPF-only mode, or /proc mode
+# with find-process-bpf-map at the service's /run/mihomo-bpf/conn_owners), and
+# only when this unit is installed and not masked, since it only matters to
+# readers that are looking processes up.

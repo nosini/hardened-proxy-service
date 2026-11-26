@@ -183,7 +183,8 @@ def listen_port(node):
         _, colon, number = address.rpartition(":")
         if not colon:
             return None
-    if not number.isdigit():
+    if not re.fullmatch(r"[0-9]+", number):
+        # Unicode digits would pass isdigit() and then fail int().
         return None
     return int(number)
 
@@ -216,7 +217,10 @@ def listener_port(node, yaml):
         if not all(re.fullmatch(r"[0-9]+", bound) for bound in bounds):
             continue
         lo, hi = (int(bound, 10) for bound in bounds)
-        if lo > hi or lo > 65535 or hi > 65535:
+        if lo > hi:
+            # mihomo swaps reversed bounds, so it still binds them.
+            lo, hi = hi, lo
+        if hi > 65535:
             continue
         if lo < 1024 and hi > 0:
             return True
@@ -251,7 +255,14 @@ def settings(filename):
     bpf_map = DEFAULT_MAP if node is None else node.value
     # A redundant separator still names the map the service binds; an empty
     # value stays empty rather than becoming ".".
-    bpf_map = posixpath.normpath(bpf_map) if bpf_map else ""
+    if bpf_map:
+        # Linux reads a run of leading separators as one, as Go's filepath.Clean
+        # does, which normpath alone does not. A trailing separator survives:
+        # a pin path with one makes BPF_OBJ_GET fail in mihomo, so it names no
+        # map this service binds.
+        bpf_map = re.sub(r"^/+", "/", bpf_map)
+        if not bpf_map.endswith("/"):
+            bpf_map = posixpath.normpath(bpf_map)
 
     # Only an explicit false selects the /proc fallback. An absent key uses the
     # BPF-only sandbox, so process lookup never gets /proc access by default.
@@ -338,7 +349,9 @@ def observer_installed():
         if path.is_symlink() and os.path.realpath(path) == "/dev/null":
             return False
         try:
-            if not path.read_text():
+            # systemd treats a 0-byte unit file as a mask; its size says so
+            # without reading it, so no encoding can crash the generator.
+            if os.stat(path).st_size == 0:
                 return False
         except OSError:
             # A dangling symlink is still the winning entry, not a missing unit.
@@ -357,11 +370,23 @@ def observer_unit():
     )
 
 
+# Mihomo's TPROXY setup runs iptables and ip, which the base unit can't: its exec
+# restriction forbids them, its empty root has no /lib64 for their ELF loader
+# (nor /etc/alternatives, through which Debian-style systems link iptables), and
+# iptables' legacy backend needs a raw socket and the xtables lock, which goes in
+# the runtime directory since the root is read-only. SELinux still requires
+# mihomo_use_iptables for all of it.
+IPTABLES = (
+    "NoExecPaths=\n"
+    "BindReadOnlyPaths=-/lib64 -/etc/alternatives\n"
+    "CapabilityBoundingSet=CAP_NET_RAW\n"
+    "AmbientCapabilities=CAP_NET_RAW\n"
+    "Environment=XTABLES_LOCKFILE=/run/mihomo/xtables.lock\n"
+)
+
+
 def dropin(mode, bind_service=False, iptables=False, bpf_map=DEFAULT_MAP):
-    # Mihomo's TPROXY iptables setup, which the base unit's exec restriction
-    # forbids; SELinux still requires mihomo_use_iptables for it.
-    exec_paths = "NoExecPaths=\n" if iptables else ""
-    return _dropin(mode, bind_service, bpf_map=bpf_map) + exec_paths
+    return _dropin(mode, bind_service, bpf_map=bpf_map) + (IPTABLES if iptables else "")
 
 
 def _dropin(mode, bind_service, bpf_map=DEFAULT_MAP):

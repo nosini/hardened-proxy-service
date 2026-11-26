@@ -99,6 +99,12 @@ class GeneratorTests(unittest.TestCase):
              "find-process-bpf-map: /run/mihomo-bpf/conn_owners\n", True, False),
             ("find-process-bpf-only: false\n"
              "find-process-bpf-map: /run/mihomo-bpf//conn_owners\n", True, False),
+            ("find-process-bpf-only: false\n"
+             "find-process-bpf-map: //run/mihomo-bpf/conn_owners\n", True, False),
+            # A trailing separator makes the pin lookup fail, so it is no map
+            # this service binds.
+            ("find-process-bpf-only: false\n"
+             "find-process-bpf-map: /run/mihomo-bpf/conn_owners/\n", False, True),
         )
         parts = (
             "Wants=socketowner.service",
@@ -117,12 +123,17 @@ class GeneratorTests(unittest.TestCase):
                 self.assertEqual("find-process-bpf-map" in errors, warning)
 
     def test_bpf_mode_accepts_a_normalized_service_map(self):
-        status, unit, errors = self.generate(
-            "find-process-bpf-only: true\n"
-            "find-process-bpf-map: /run/mihomo-bpf//conn_owners\n")
-        self.assertEqual(status, 0, errors)
-        self.assertIn("Requires=socketowner.service", unit)
-        self.assertIn("BindReadOnlyPaths=/sys/fs/bpf/mihomo/maps:/run/mihomo-bpf", unit)
+        for map_path in ("/run/mihomo-bpf//conn_owners",
+                          "//run/mihomo-bpf/conn_owners"):
+            with self.subTest(map_path=map_path):
+                status, unit, errors = self.generate(
+                    "find-process-bpf-only: true\n"
+                    f"find-process-bpf-map: {map_path}\n")
+                self.assertEqual(status, 0, errors)
+                self.assertIn("Requires=socketowner.service", unit)
+                self.assertIn(
+                    "BindReadOnlyPaths=/sys/fs/bpf/mihomo/maps:/run/mihomo-bpf",
+                    unit)
 
     def test_absent_bpf_only_uses_bpf_sandbox(self):
         bpf = "find-process-bpf-map: /run/mihomo-bpf/conn_owners\n"
@@ -165,6 +176,11 @@ class GeneratorTests(unittest.TestCase):
                 status, unit, errors = self.generate(config)
                 self.assertEqual(status, 0, errors)
                 self.assertEqual("NoExecPaths=\n" in unit, lifted)
+                for line in ("BindReadOnlyPaths=-/lib64 -/etc/alternatives\n",
+                             "AmbientCapabilities=CAP_NET_RAW\n",
+                             "CapabilityBoundingSet=CAP_NET_RAW\n",
+                             "Environment=XTABLES_LOCKFILE=/run/mihomo/xtables.lock\n"):
+                    self.assertEqual(line in unit, lifted, line)
 
     def test_bind_service_only_for_listener_ports_below_1024(self):
         for config, granted in (
@@ -211,7 +227,8 @@ class GeneratorTests(unittest.TestCase):
             ("listeners:\n  - name: a\n    port: '800-1080'\n", True),
             ("listeners:\n  - name: a\n    port: '1023-1024'\n", True),
             ("listeners:\n  - name: a\n    port: '1800-2000'\n", False),
-            ("listeners:\n  - name: a\n    port: '800-700'\n", False),
+            ("listeners:\n  - name: a\n    port: '800-700'\n", True),
+            ("listeners:\n  - name: a\n    port: '2000-1024'\n", False),
             ("listeners:\n  - name: a\n    port: '80,443'\n", True),
             ("listeners:\n  - name: a\n    port: '8000,443'\n", True),
             ("listeners:\n  - name: a\n    port: '8000/443'\n", True),
@@ -224,6 +241,12 @@ class GeneratorTests(unittest.TestCase):
                 status, unit, errors = self.generate("find-process-mode: off\n" + config)
                 self.assertEqual(status, 0, errors)
                 self.assertEqual("CAP_NET_BIND_SERVICE" in unit, granted)
+
+    def test_listen_port_rejects_non_ascii_digits(self):
+        status, unit, errors = self.generate(
+            "find-process-mode: off\nexternal-controller: 127.0.0.1:²\n")
+        self.assertEqual(status, 0, errors)
+        self.assertNotIn("CAP_NET_BIND_SERVICE", unit)
 
     def test_low_port_adds_bind_service_to_proc_capabilities(self):
         status, unit, errors = self.generate(
@@ -410,6 +433,15 @@ class GeneratorTests(unittest.TestCase):
             (self.output / "socketowner-wine-observer.service.d/"
              "50-reader-group.conf").exists())
 
+    def test_non_utf8_observer_file_is_installed(self):
+        self.observer.write_bytes(b"\xff\xfe")
+        status, unit, errors = self.generate(
+            "find-process-bpf-only: true\n"
+            "find-process-bpf-map: /run/mihomo-bpf/conn_owners\n")
+        self.assertEqual(status, 0, errors)
+        self.assertIn("Wants=socketowner-wine-observer.service", unit)
+        self.assertIn("After=socketowner-wine-observer.service", unit)
+
     def test_config_error_still_writes_the_reader_group(self):
         self.install_observer()
         self.reader_group_file()
@@ -496,6 +528,8 @@ class GeneratorTests(unittest.TestCase):
             "a: &a 1\n<<: *a\n",
             "a: &a\n  <<: *a\n<<: *a\n",
             "find-process-bpf-only: true\nfind-process-bpf-map: /wrong/map\n",
+            "find-process-bpf-only: true\n"
+            "find-process-bpf-map: /run/mihomo-bpf/conn_owners/\n",
             "find-process-bpf-only: true\n",
             "[]\n",
             "",

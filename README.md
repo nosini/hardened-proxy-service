@@ -399,8 +399,9 @@ sudo systemctl restart socketowner.service
 Keep loader installation and updates separate from mihomo updates; replacing
 mihomo must not replace the privileged executable.
 
-Then install the unit and restart mihomo. The generator starts the loader with mihomo
-whenever process lookup is on, so it needs no enabling:
+Then install the unit and restart mihomo. The generator starts the loader with mihomo in
+BPF-only mode, and in `/proc` mode only when `find-process-bpf-map` is the
+service's `/run/mihomo-bpf/conn_owners`, so it needs no enabling:
 
 ```sh
 sudo install -m 644 socketowner.service /etc/systemd/system/
@@ -456,7 +457,16 @@ installed, only when `find-process-bpf-map: /run/mihomo-bpf/conn_owners` is set.
 the BPF LSM socketowner can still record which process owns each connection, though not
 what each process runs. That keeps short UDP exchanges matching their rules while the
 process runs; mihomo then reads the path from `/proc`. Without it, though, a connected
-socket that one process hands to another is still credited to the first. Install it as
+socket that one process hands to another is still credited to the first.
+
+Without `-exec-paths` there is a second cost. mihomo must still check each BPF-recorded
+owner's PID start time through `/proc/<pid>/stat`, because a PID can be reused, and the
+policy deliberately grants no `open` on other domains' files — that is what keeps their
+`environ`, `cmdline` and `mem` closed. Under enforcing SELinux every such lookup is
+denied: it logs an AVC denial for the `open` and the start-time check is skipped, with
+the executable still read from the `/proc/<pid>/exe` link, which the policy allows.
+Running socketowner with `-exec-paths` records executables in the maps and avoids both
+the check and the denials, but it needs the BPF LSM. Install it as
 above and run it without `-exec-paths`:
 
 ```sh
@@ -517,8 +527,10 @@ sudo systemctl daemon-reload
 sudo systemctl restart mihomo.service
 ```
 
-The observer has no `[Install]` section and needs no `systemctl enable`: when process
-lookup is on and the unit is installed, the generator makes `mihomo.service` want it.
+The observer has no `[Install]` section and needs no `systemctl enable`: the
+generator makes `mihomo.service` want it only where it also starts the loader
+(BPF-only mode, or `/proc` mode with `find-process-bpf-map:
+/run/mihomo-bpf/conn_owners`) and the unit is installed and not masked.
 The observer starts after the native loader and before mihomo, and signals readiness only
 after its hooks and maps are ready. Start it before launching games. It restarts with the
 native loader; the loader's detach leaves the observer's pins alone, and the observer
@@ -566,14 +578,19 @@ records until restart. mihomo treats stale records as `wine-unknown`. The
 process remains the sandbox's pasta, so a pasta rule after the Wine rules is the
 fallback for unknown flows and those without a Wine record. Decide DNS exceptions
 before adding a blanket `wine-unknown` rejection. Stopping this optional service leaves
-native process lookup available. The generator starts it again with mihomo while
-process lookup is on; remove its unit file to keep it off:
+native process lookup available. The generator starts it again with mihomo wherever it
+starts the loader and the unit is installed and not masked; remove its unit file to keep
+it off:
 
 ```sh
 sudo systemctl stop socketowner-wine-observer.service
 sudo rm /etc/systemd/system/socketowner-wine-observer.service
 sudo systemctl daemon-reload
 ```
+
+A unit installed under `/usr/lib/systemd/system`, as a package installs it, is not
+removed that way; `sudo systemctl mask socketowner-wine-observer.service` keeps it off
+without touching the file.
 
 ### Routing by Flatpak app
 
@@ -693,11 +710,17 @@ grants that only with `mihomo_use_iptables`, which is off by default:
 sudo setsebool -P mihomo_use_iptables on
 ```
 
-The generator warns at boot when mihomo will run `iptables` and the boolean is off. It
-also lifts the unit's `NoExecPaths=` restriction only then, since `iptables`, `ip` and
-their libraries must run; SELinux still allows exec only of those commands and only with
-the boolean. The service keeps `/proc/sys` read-only, so with an `inbound-interface`
-other than `lo` the host must enable `net.ipv4.ip_forward` itself.
+The generator warns at boot when mihomo will run `iptables` and the boolean is off. Only
+then does its drop-in give the unit what `iptables` and `ip` need: it lifts the
+`NoExecPaths=` restriction, binds `/lib64` (their ELF loader) and `/etc/alternatives` (where
+Debian-style systems link `iptables`) read-only, and adds `CAP_NET_RAW` for the raw socket of
+iptables' legacy backend, the default on openSUSE. The legacy backend also takes the xtables
+lock, which the drop-in points at `/run/mihomo/xtables.lock` because the service can't write
+the host's `/run/xtables.lock`; mihomo's rule setup therefore doesn't wait for other
+legacy `iptables` commands running at the same moment. SELinux still allows exec only of
+those commands, the lock file and loading the xtables modules they use, and only with the
+boolean. The service keeps `/proc/sys` read-only, so with an `inbound-interface` other than
+`lo` the host must enable `net.ipv4.ip_forward` itself.
 
 ## Updating
 
@@ -803,8 +826,9 @@ sudo systemctl restart mihomo.service
 ```
 
 socketowner no longer needs to be enabled: the generator starts it with mihomo
-whenever process lookup is on. In BPF-only mode, remove any `no-exec-paths.conf` loader
-drop-in so it records executables too.
+in BPF-only mode, and in `/proc` mode when `find-process-bpf-map` is the
+service's `/run/mihomo-bpf/conn_owners`. In BPF-only mode, remove any
+`no-exec-paths.conf` loader drop-in so it records executables too.
 
 Rebuild and load the SELinux module, relabel `/etc/mihomo` (version 1.3 gave mihomo's
 writable files a type of their own) and, if you use it, `/usr/local/bin/socketowner`

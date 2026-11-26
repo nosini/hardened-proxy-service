@@ -57,6 +57,7 @@ LockPersonality=yes
 MemoryDenyWriteExecute=yes
 UMask=0077
 
-# No [Install] section: mihomo-process-generator makes mihomo start this whenever
-# process lookup is on. In BPF-only mode mihomo requires it; in /proc mode mihomo
-# starts without it if attaching fails.
+# No [Install] section: mihomo-process-generator makes mihomo start this in
+# BPF-only mode, and in /proc mode only when find-process-bpf-map is the
+# service's /run/mihomo-bpf/conn_owners. In BPF-only mode mihomo requires it; in
+# /proc mode mihomo starts without it if attaching fails.

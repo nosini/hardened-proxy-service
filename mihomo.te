@@ -1,4 +1,4 @@
-policy_module(mihomo, 1.14)
+policy_module(mihomo, 1.15)
 
 type mihomo_t;
 type mihomo_exec_t;
@@ -6,6 +6,9 @@ type mihomo_exec_t;
 type mihomo_conf_t;
 # What mihomo writes in it: ruleset/, cache.db and geoip.metadb
 type mihomo_data_t;
+# /run/mihomo, the RuntimeDirectory; holds the iptables lock for TPROXY setup
+type mihomo_runtime_t;
+files_pid_file(mihomo_runtime_t)
 
 init_daemon_domain(mihomo_t, mihomo_exec_t)
 # socketowner, which attaches the BPF programs that record socket owners
@@ -85,10 +88,32 @@ allow mihomo_t unreserved_port_t:udp_socket name_bind;
 
 allow mihomo_t tun_tap_device_t:chr_file { getattr ioctl open read write };
 # Only TPROXY redirects need to run iptables and ip; see mihomo_use_iptables.
+# Both run in mihomo_t. Executing a binary maps it, so the exec permissions include map.
+# The commands are found through PATH, where /usr/sbin/iptables is a symlink: to the
+# xtables binary, or on openSUSE to the libalternatives launcher alts, which reads its
+# configuration under /usr/share/libalternatives and then executes the xtables binary.
+# The legacy backend talks to the kernel over a raw socket and takes the xtables lock,
+# which the unit's drop-in points into /run/mihomo; the nft backend uses netlink. Either
+# loads the xtables match and target modules (xt_socket, xt_TPROXY, ...) on first use.
 tunable_policy(`mihomo_use_iptables',`
-    allow mihomo_t iptables_exec_t:file { execute execute_no_trans getattr open read };
-    allow mihomo_t ifconfig_exec_t:file { execute execute_no_trans getattr open read };
+    can_exec(mihomo_t, { iptables_exec_t ifconfig_exec_t })
+    allow mihomo_t { iptables_exec_t ifconfig_exec_t }:lnk_file read_lnk_file_perms;
+    corecmd_search_bin(mihomo_t)
+    corecmd_read_bin_symlinks(mihomo_t)
     allow mihomo_t self:netlink_netfilter_socket setopt;
+    allow mihomo_t self:capability net_raw;
+    allow mihomo_t self:rawip_socket { create getopt setopt };
+    manage_files_pattern(mihomo_t, mihomo_runtime_t, mihomo_runtime_t)
+    kernel_request_load_module(mihomo_t)
+')
+optional_policy(`
+    gen_require(`
+        type alts_exec_t;
+    ')
+    tunable_policy(`mihomo_use_iptables',`
+        can_exec(mihomo_t, alts_exec_t)
+        files_read_usr_files(mihomo_t)
+    ')
 ')
 
 allow mihomo_t mihomo_conf_t:dir { list_dir_perms watch };
