@@ -302,7 +302,7 @@ drop-in for `mihomo.service`:
 | `find-process-mode: off` | Other users' processes hidden; no BPF maps or inspection capabilities |
 | `find-process-bpf-only: true` with matching enabled | Other users' processes hidden; requires socketowner and its maps |
 | `find-process-bpf-only` absent with matching enabled | With `find-process-bpf-map: /run/mihomo-bpf/conn_owners`, the BPF-only sandbox; otherwise as `off`, so lookups fail. `/proc` is never granted |
-| `find-process-bpf-only: false` with matching enabled | Processes visible; adds `CAP_SYS_PTRACE` and `CAP_DAC_READ_SEARCH`; starts socketowner, whose maps are optional |
+| `find-process-bpf-only: false` with matching enabled | Processes visible; adds `CAP_SYS_PTRACE` and `CAP_DAC_READ_SEARCH`; with `find-process-bpf-map: /run/mihomo-bpf/conn_owners`, also starts socketowner and binds its maps |
 
 Matching is enabled with `always` or `strict` (mihomo's default). Only an explicit
 `find-process-bpf-only: false` selects the `/proc` fallback. Mihomo then tries BPF first:
@@ -314,15 +314,19 @@ mihomo runs with no lookup privileges and its process rules don't match.
 
 An omitted `find-process-bpf-map` uses mihomo's default map path; an explicitly empty
 value disables BPF lookup. The base unit denies `bpf()`, and the generator allows it
-only in the BPF-only and `/proc` modes, where socketowner's maps are read; with lookup
-off mihomo cannot make BPF calls. In fallback mode the generator still binds the maps
-even when the map path is empty. Mihomo itself never needs `CAP_BPF` to read the maps.
+only in the BPF-only and `/proc` modes; with lookup off mihomo cannot make BPF calls.
+In `/proc` mode the generator adds the BPF parts, socketowner, the `bpf()` permission
+and the map mount, only when the map path is `/run/mihomo-bpf/conn_owners`. With any
+other path it warns that BPF lookup, `FLATPAK-APP`, `SYSTEMD-UNIT` and
+`WINE-PROCESS-*` rules then need `find-process-bpf-map:
+/run/mihomo-bpf/conn_owners`. Mihomo itself never needs `CAP_BPF` to read the maps.
 
 The service keeps a read-only `/proc` for its own memory statistics and other runtime
 uses. `ProtectProc=invisible` hides other users' processes in BPF-only and off modes.
-The generator does not inspect whether the loader is currently active. Both lookup
-modes start it with mihomo. In BPF-only mode, attachment failure prevents mihomo from
-starting; in `/proc` mode, mihomo starts anyway and falls back to `/proc`.
+The generator does not inspect whether the loader is currently active. When the map
+path is the service's, both lookup modes start it with mihomo. In BPF-only mode,
+attachment failure prevents mihomo from starting; in `/proc` mode, mihomo starts
+anyway and falls back to `/proc`.
 
 After changing lookup mode, reload and restart; an API configuration reload alone cannot
 change an existing process's sandbox:
@@ -635,15 +639,18 @@ sudo setsebool -P mihomo_load_modules on
 ```
 
 TPROXY, with a nonzero `tproxy-port`, makes mihomo run `iptables` to set up its redirect
-rules. The policy grants that only with `mihomo_use_iptables`, which is off by default:
+rules when `iptables.enable: true` and TUN is off (`tun.enable` is not true). The policy
+grants that only with `mihomo_use_iptables`, which is off by default:
 
 ```sh
 sudo setsebool -P mihomo_use_iptables on
 ```
 
-The generator warns at boot when `tproxy-port` is set and the boolean is off. It also
-lifts the unit's `NoExecPaths=` restriction for TPROXY, since `iptables` and its libraries
-must run; SELinux still allows exec only of `iptables` and only with the boolean.
+The generator warns at boot when mihomo will run `iptables` and the boolean is off. It
+also lifts the unit's `NoExecPaths=` restriction only then, since `iptables`, `ip` and
+their libraries must run; SELinux still allows exec only of those commands and only with
+the boolean. The service keeps `/proc/sys` read-only, so with an `inbound-interface`
+other than `lo` the host must enable `net.ipv4.ip_forward` itself.
 
 ## Updating
 

@@ -24,7 +24,7 @@ class GeneratorTests(unittest.TestCase):
         self.config = self.root / "config.yaml"
         self.output = self.root / "generated"
         self.observer = self.root / "socketowner-wine-observer.service"
-        patcher = patch.object(generator, "OBSERVER", self.observer)
+        patcher = patch.object(generator, "OBSERVER_PATHS", (self.observer,))
         patcher.start()
         self.addCleanup(patcher.stop)
 
@@ -42,10 +42,22 @@ class GeneratorTests(unittest.TestCase):
     def booleans(self, **values):
         directory = Path(tempfile.mkdtemp(dir=self.root))
         for name, value in values.items():
-            (directory / name).write_text(value + "\n")
+            (directory / name).write_text(value)
         patcher = patch.object(generator, "BOOLEAN_DIR", directory)
         patcher.start()
         self.addCleanup(patcher.stop)
+
+    def reader_group_file(self):
+        groups = self.root / "group"
+        groups.write_text("mihomo:x:4242:\n")
+        patcher = patch.object(generator, "GROUP_FILE", groups)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def observer_paths(self):
+        base = self.root / "systemd"
+        return tuple(base / name / "socketowner-wine-observer.service"
+                     for name in ("etc", "run", "usr-local", "usr"))
 
     def test_bpf_requires_loader_and_maps_without_proc_privileges(self):
         status, unit, errors = self.generate(
@@ -62,7 +74,10 @@ class GeneratorTests(unittest.TestCase):
         self.assertIn("ExecStart=/usr/local/bin/mihomo", unit)
 
     def test_proc_grants_process_inspection_without_requiring_loader(self):
-        status, unit, errors = self.generate("find-process-bpf-only: false\n")
+        status, unit, errors = self.generate(
+            "find-process-bpf-only: false\n"
+            "find-process-bpf-map: /run/mihomo-bpf/conn_owners\n"
+        )
         self.assertEqual(status, 0, errors)
         self.assertIn("ProtectProc=default", unit)
         for directive in ("CapabilityBoundingSet", "AmbientCapabilities"):
@@ -73,6 +88,41 @@ class GeneratorTests(unittest.TestCase):
         self.assertIn("Wants=socketowner.service", unit)
         self.assertIn("SystemCallFilter=bpf", unit)
         self.assertIn("BindReadOnlyPaths=-/sys/fs/bpf/mihomo/maps:/run/mihomo-bpf", unit)
+
+    def test_proc_mode_adds_bpf_parts_only_for_the_service_map(self):
+        self.install_observer()
+        cases = (
+            # Absent uses mihomo's default map, which the sandbox doesn't bind.
+            ("find-process-bpf-only: false\n", False, True),
+            ("find-process-bpf-only: false\nfind-process-bpf-map: ''\n", False, False),
+            ("find-process-bpf-only: false\n"
+             "find-process-bpf-map: /run/mihomo-bpf/conn_owners\n", True, False),
+            ("find-process-bpf-only: false\n"
+             "find-process-bpf-map: /run/mihomo-bpf//conn_owners\n", True, False),
+        )
+        parts = (
+            "Wants=socketowner.service",
+            "Wants=socketowner-wine-observer.service",
+            "SystemCallFilter=bpf",
+            "BindReadOnlyPaths=-/sys/fs/bpf/mihomo/maps:/run/mihomo-bpf",
+        )
+        for config, bpf, warning in cases:
+            with self.subTest(config=config):
+                status, unit, errors = self.generate(config)
+                self.assertEqual(status, 0, errors)
+                self.assertIn("ProtectProc=default", unit)
+                for part in parts:
+                    self.assertEqual(part in unit, bpf)
+                self.assertNotIn("Requires=socketowner.service", unit)
+                self.assertEqual("find-process-bpf-map" in errors, warning)
+
+    def test_bpf_mode_accepts_a_normalized_service_map(self):
+        status, unit, errors = self.generate(
+            "find-process-bpf-only: true\n"
+            "find-process-bpf-map: /run/mihomo-bpf//conn_owners\n")
+        self.assertEqual(status, 0, errors)
+        self.assertIn("Requires=socketowner.service", unit)
+        self.assertIn("BindReadOnlyPaths=/sys/fs/bpf/mihomo/maps:/run/mihomo-bpf", unit)
 
     def test_absent_bpf_only_uses_bpf_sandbox(self):
         bpf = "find-process-bpf-map: /run/mihomo-bpf/conn_owners\n"
@@ -96,12 +146,25 @@ class GeneratorTests(unittest.TestCase):
                 self.assertNotIn("socketowner", unit)
                 self.assertNotIn("SYS_PTRACE", unit)
 
-    def test_tproxy_lifts_exec_restriction(self):
-        status, unit, errors = self.generate("tproxy-port: 7893\n")
-        self.assertEqual(status, 0, errors)
-        self.assertIn("NoExecPaths=\n", unit)
-        status, unit, errors = self.generate("mixed-port: 7891\n")
-        self.assertNotIn("NoExecPaths", unit)
+    def test_tproxy_lifts_exec_restriction_only_when_iptables_will_run(self):
+        for config, lifted in (
+            ("tproxy-port: 7893\n", False),
+            ("tproxy-port: 7893\niptables:\n  enable: false\n", False),
+            ("tproxy-port: 7893\niptables:\n  enable: true\n", True),
+            ("tproxy-port: 7893\niptables:\n  enable: 'on'\n", True),
+            ("tproxy-port: 7893\niptables:\n  enable: maybe\n", False),
+            ("tproxy-port: 7893\niptables: true\n", False),
+            ("tproxy-port: 7893\niptables:\n  enable: true\ntun:\n  enable: true\n",
+             False),
+            ("tproxy-port: 7893\niptables:\n  enable: true\ntun:\n  enable: false\n",
+             True),
+            ("iptables:\n  enable: true\n", False),
+            ("mixed-port: 7891\niptables:\n  enable: true\n", False),
+        ):
+            with self.subTest(config=config):
+                status, unit, errors = self.generate(config)
+                self.assertEqual(status, 0, errors)
+                self.assertEqual("NoExecPaths=\n" in unit, lifted)
 
     def test_bind_service_only_for_listener_ports_below_1024(self):
         for config, granted in (
@@ -135,32 +198,49 @@ class GeneratorTests(unittest.TestCase):
         self.assertIn("AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE "
                       "CAP_SYS_PTRACE CAP_DAC_READ_SEARCH", unit)
 
+    def test_boolean_off_reads_the_active_field(self):
+        for contents, off in (("0 0", True), ("0 1", True),
+                              ("1 0", False), ("1 1", False)):
+            with self.subTest(contents=contents):
+                self.booleans(mihomo_find_process_proc=contents)
+                self.assertEqual(
+                    generator.boolean_off("mihomo_find_process_proc"), off)
+
     def test_proc_lookup_warns_when_selinux_boolean_is_off(self):
-        self.booleans(mihomo_find_process_proc="0")
+        self.booleans(mihomo_find_process_proc="0 1")
         status, unit, errors = self.generate("find-process-bpf-only: false\n")
         self.assertEqual(status, 0, errors)
         self.assertIn("ProtectProc=default", unit)
         self.assertIn("setsebool -P mihomo_find_process_proc on", errors)
 
     def test_proc_lookup_is_quiet_when_boolean_is_on_or_absent(self):
-        self.booleans(mihomo_find_process_proc="1")
+        self.booleans(mihomo_find_process_proc="1 0")
         self.assertEqual(self.generate("find-process-bpf-only: false\n")[0], 0)
         self.booleans()
         status, unit, errors = self.generate("find-process-bpf-only: false\n")
         self.assertEqual(status, 0, errors)
         self.assertNotIn("mihomo_find_process_proc", errors)
 
-    def test_tproxy_warns_when_iptables_boolean_is_off(self):
-        self.booleans(mihomo_use_iptables="0")
-        status, unit, errors = self.generate("find-process-mode: off\ntproxy-port: 7893\n")
-        self.assertEqual(status, 0, errors)
-        self.assertIn("setsebool -P mihomo_use_iptables on", errors)
-        for config in ("find-process-mode: off\ntproxy-port: 0\n",
-                       "find-process-mode: off\nmixed-port: 7893\n"):
+    def test_iptables_warns_only_when_mihomo_runs_iptables(self):
+        self.booleans(mihomo_use_iptables="0 0")
+        for config, warned in (
+            ("find-process-mode: off\ntproxy-port: 7893\n", False),
+            ("find-process-mode: off\ntproxy-port: 7893\niptables:\n  enable: true\n",
+             True),
+            ("find-process-mode: off\ntproxy-port: 7893\niptables:\n  enable: false\n",
+             False),
+            ("find-process-mode: off\ntproxy-port: 7893\niptables:\n  enable: true\n"
+             "tun:\n  enable: true\n", False),
+            ("find-process-mode: off\ntproxy-port: 0\niptables:\n  enable: true\n",
+             False),
+            ("find-process-mode: off\nmixed-port: 7893\niptables:\n  enable: true\n",
+             False),
+        ):
             with self.subTest(config=config):
                 status, unit, errors = self.generate(config)
                 self.assertEqual(status, 0, errors)
-                self.assertNotIn("mihomo_use_iptables", errors)
+                self.assertEqual("setsebool -P mihomo_use_iptables on" in errors,
+                                 warned)
 
     def test_off_keeps_restricted_base_and_does_not_mount_maps(self):
         for value in ("off", "OFF", "'off'"):
@@ -180,7 +260,7 @@ class GeneratorTests(unittest.TestCase):
                 self.assertEqual(status, 0, errors)
                 self.assertNotIn("SystemCallFilter=bpf", unit)
         for config in ("find-process-mode: always\n" + bpf,
-                       "find-process-bpf-only: false\n"):
+                       "find-process-bpf-only: false\n" + bpf):
             with self.subTest(config=config):
                 status, unit, errors = self.generate(config)
                 self.assertEqual(status, 0, errors)
@@ -189,7 +269,7 @@ class GeneratorTests(unittest.TestCase):
     def test_observer_is_wanted_only_when_installed_and_lookup_is_on(self):
         bpf = "find-process-bpf-map: /run/mihomo-bpf/conn_owners\n"
         for config in ("find-process-mode: always\n" + bpf,
-                       "find-process-bpf-only: false\n"):
+                       "find-process-bpf-only: false\n" + bpf):
             with self.subTest(config=config):
                 status, unit, errors = self.generate(config)
                 self.assertEqual(status, 0, errors)
@@ -197,7 +277,7 @@ class GeneratorTests(unittest.TestCase):
 
         self.install_observer()
         for config in ("find-process-mode: always\n" + bpf,
-                       "find-process-bpf-only: false\n"):
+                       "find-process-bpf-only: false\n" + bpf):
             with self.subTest(config=config):
                 status, unit, errors = self.generate(config)
                 self.assertEqual(status, 0, errors)
@@ -223,6 +303,65 @@ class GeneratorTests(unittest.TestCase):
             groups.write_text("root:x:0:\n")
             self.generate("find-process-bpf-only: false\n")
             self.assertFalse(dropin.exists())
+
+    def test_observer_under_usr_lib_is_detected(self):
+        paths = self.observer_paths()
+        paths[3].parent.mkdir(parents=True)
+        paths[3].write_text("[Unit]\n")
+        self.reader_group_file()
+        with patch.object(generator, "OBSERVER_PATHS", paths):
+            status, unit, errors = self.generate(
+                "find-process-bpf-only: true\n"
+                "find-process-bpf-map: /run/mihomo-bpf/conn_owners\n")
+        self.assertEqual(status, 0, errors)
+        self.assertIn("Wants=socketowner-wine-observer.service", unit)
+        dropin = self.output / "socketowner-wine-observer.service.d/50-reader-group.conf"
+        self.assertEqual(dropin.read_text(),
+                         "[Service]\nEnvironment=READER_GROUP=4242\n")
+
+    def test_observer_masked_by_etc_symlink_to_dev_null(self):
+        paths = self.observer_paths()
+        paths[0].parent.mkdir(parents=True)
+        paths[0].symlink_to("/dev/null")
+        paths[3].parent.mkdir(parents=True)
+        paths[3].write_text("[Unit]\n")
+        self.reader_group_file()
+        with patch.object(generator, "OBSERVER_PATHS", paths):
+            status, unit, errors = self.generate(
+                "find-process-bpf-only: true\n"
+                "find-process-bpf-map: /run/mihomo-bpf/conn_owners\n")
+        self.assertEqual(status, 0, errors)
+        self.assertNotIn("socketowner-wine-observer", unit)
+        self.assertFalse(
+            (self.output / "socketowner-wine-observer.service.d/"
+             "50-reader-group.conf").exists())
+
+    def test_empty_observer_file_is_masked(self):
+        paths = self.observer_paths()
+        paths[0].parent.mkdir(parents=True)
+        paths[0].write_text("")
+        paths[3].parent.mkdir(parents=True)
+        paths[3].write_text("[Unit]\n")
+        self.reader_group_file()
+        with patch.object(generator, "OBSERVER_PATHS", paths):
+            status, unit, errors = self.generate(
+                "find-process-bpf-only: true\n"
+                "find-process-bpf-map: /run/mihomo-bpf/conn_owners\n")
+        self.assertEqual(status, 0, errors)
+        self.assertNotIn("socketowner-wine-observer", unit)
+        self.assertFalse(
+            (self.output / "socketowner-wine-observer.service.d/"
+             "50-reader-group.conf").exists())
+
+    def test_config_error_still_writes_the_reader_group(self):
+        self.install_observer()
+        self.reader_group_file()
+        status, unit, errors = self.generate("find-process-mode: invalid\n")
+        self.assertEqual(status, 1)
+        self.assertEqual(unit, generator.DENY)
+        dropin = self.output / "socketowner-wine-observer.service.d/50-reader-group.conf"
+        self.assertEqual(dropin.read_text(),
+                         "[Service]\nEnvironment=READER_GROUP=4242\n")
 
     def test_blocked_startup_never_restarts_the_placeholder(self):
         self.assertIn("Restart=no", generator.DENY)

@@ -4,6 +4,10 @@ Requires=socketowner.service
 PartOf=socketowner.service
 After=socketowner.service
 Before=mihomo.service
+# RestartSec=6 never reaches the default limit of 5 starts in 10 s, so without this a
+# permanent error would restart the observer forever.
+StartLimitIntervalSec=60s
+StartLimitBurst=5
 
 [Service]
 Type=notify
